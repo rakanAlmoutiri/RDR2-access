@@ -1,0 +1,40 @@
+=== Using MSBuild: C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe ===
+=== Using Toolset Override: /p:PlatformToolset=v143 ===
+=== Building Tolk.dll (Release x64) ===
+=== Building NativeTrainer (Release x64) ===
+ERROR: Building NativeTrainer failed. See "C:\Users\hamad\AppData\Local\Temp\msbuild_nt.log"
+--- Last 120 lines of "C:\Users\hamad\AppData\Local\Temp\msbuild_nt.log" ---
+
+  script.cpp
+c:\Users\hamad\projects\rdr2\ScriptHookRDR2_SDK_1.0.1207.73\samples\NativeTrainer\script.cpp(1769,24): error C2039: 'IS_PED_SPRINTING': is not a member of 'PED' [c:\Users\hamad\projects\rdr2\ScriptHookRDR2_SDK_1.0.1207.73\samples\NativeTrainer\NativeTrainer.vcxproj]
+      c:\Users\hamad\projects\rdr2\ScriptHookRDR2_SDK_1.0.1207.73\inc\natives.h(657,11):
+      see declaration of 'PED'
+  
+c:\Users\hamad\projects\rdr2\ScriptHookRDR2_SDK_1.0.1207.73\samples\NativeTrainer\script.cpp(1769,24): error C3861: 'IS_PED_SPRINTING': identifier not found [c:\Users\hamad\projects\rdr2\ScriptHookRDR2_SDK_1.0.1207.73\samples\NativeTrainer\NativeTrainer.vcxproj]
+c:\Users\hamad\projects\rdr2\ScriptHookRDR2_SDK_1.0.1207.73\samples\NativeTrainer\script.cpp(1770,25): error C2039: 'IS_SPECIAL_ABILITY_ACTIVE': is not a member of 'PLAYER' [c:\Users\hamad\projects\rdr2\ScriptHookRDR2_SDK_1.0.1207.73\samples\NativeTrainer\NativeTrainer.vcxproj]
+      c:\Users\hamad\projects\rdr2\ScriptHookRDR2_SDK_1.0.1207.73\inc\natives.h(6,11):
+      see declaration of 'PLAYER'
+  
+c:\Users\hamad\projects\rdr2\ScriptHookRDR2_SDK_1.0.1207.73\samples\NativeTrainer\script.cpp(1770,25): error C3861: 'IS_SPECIAL_ABILITY_ACTIVE': identifier not found [c:\Users\hamad\projects\rdr2\ScriptHookRDR2_SDK_1.0.1207.73\samples\NativeTrainer\NativeTrainer.vcxproj]
+c:\Users\hamad\projects\rdr2\ScriptHookRDR2_SDK_1.0.1207.73\samples\NativeTrainer\script.cpp(1807,25): error C2039: 'IS_PED_SPRINTING': is not a member of 'PED' [c:\Users\hamad\projects\rdr2\ScriptHookRDR2_SDK_1.0.1207.73\samples\NativeTrainer\NativeTrainer.vcxproj]
+      c:\Users\hamad\projects\rdr2\ScriptHookRDR2_SDK_1.0.1207.73\inc\natives.h(657,11):
+      see declaration of 'PED'
+  
+c:\Users\hamad\projects\rdr2\ScriptHookRDR2_SDK_1.0.1207.73\samples\NativeTrainer\script.cpp(1807,25): error C3861: 'IS_PED_SPRINTING': identifier not found [c:\Users\hamad\projects\rdr2\ScriptHookRDR2_SDK_1.0.1207.73\samples\NativeTrainer\NativeTrainer.vcxproj]
+c:\Users\hamad\projects\rdr2\ScriptHookRDR2_SDK_1.0.1207.73\samples\NativeTrainer\script.cpp(1815,26): error C2039: 'IS_SPECIAL_ABILITY_ACTIVE': is not a member of 'PLAYER' [c:\Users\hamad\projects\rdr2\ScriptHookRDR2_SDK_1.0.1207.73\samples\NativeTrainer\NativeTrainer.vcxproj]
+      c:\Users\hamad\projects\rdr2\ScriptHookRDR2_SDK_1.0.1207.73\inc\natives.h(6,11):
+      see declaration of 'PLAYER'
+  
+c:\Users\hamad\projects\rdr2\ScriptHookRDR2_SDK_1.0.1207.73\samples\NativeTrainer\script.cpp(1815,26): error C3861: 'IS_SPECIAL_ABILITY_ACTIVE': identifier not found [c:\Users\hamad\projects\rdr2\ScriptHookRDR2_SDK_1.0.1207.73\samples\NativeTrainer\NativeTrainer.vcxproj]
+c:\Users\hamad\projects\rdr2\ScriptHookRDR2_SDK_1.0.1207.73\samples\NativeTrainer\script.cpp(1871,23): error C2664: 'BOOL ENTITY::IS_ENTITY_AN_OBJECT(Player *)': cannot convert argument 1 from 'Entity' to 'Player *' [c:\Users\hamad\projects\rdr2\ScriptHookRDR2_SDK_1.0.1207.73\samples\NativeTrainer\NativeTrainer.vcxproj]
+      c:\Users\hamad\projects\rdr2\ScriptHookRDR2_SDK_1.0.1207.73\samples\NativeTrainer\script.cpp(1871,43):
+      Conversion from integral type to pointer type requires reinterpret_cast, C-style cast or parenthesized function-style cast
+      c:\Users\hamad\projects\rdr2\ScriptHookRDR2_SDK_1.0.1207.73\inc\natives.h(454,14):
+      see declaration of 'ENTITY::IS_ENTITY_AN_OBJECT'
+      c:\Users\hamad\projects\rdr2\ScriptHookRDR2_SDK_1.0.1207.73\samples\NativeTrainer\script.cpp(1871,23):
+      while trying to match the argument list '(Entity)'
+  
+
+--------------------------------
+Build failed. Ensure you are in a Developer Command Prompt for VS (msbuild available).
+See logs if present: "C:\Users\hamad\AppData\Local\Temp\msbuild_tolk.log" and "C:\Users\hamad\AppData\Local\Temp\msbuild_nt.log"
