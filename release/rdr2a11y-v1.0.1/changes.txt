@@ -1,0 +1,7 @@
+new in 1.0
+Sunday, August 31, 2025
+## new
+
+-  numpad1 to check your health. 
+2 to check your horse while using it. 
+aiming on anything, will give you some information about it. 

@@ -1,0 +1,159 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Build RDR2 A11y Release",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/d",
+				"/c",
+				"c:\\Users\\hamad\\projects\\rdr2\\rdr2a11y\\build_all.cmd"
+			],
+			"problemMatcher": [
+				"$msCompile"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Build RDR2 A11y Release",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/d",
+				"/c",
+				"c:\\Users\\hamad\\projects\\rdr2\\rdr2a11y\\build_all.cmd"
+			],
+			"problemMatcher": [
+				"$msCompile"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Build RDR2 A11y Release",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/d",
+				"/c",
+				"c:\\Users\\hamad\\projects\\rdr2\\rdr2a11y\\build_all.cmd"
+			],
+			"problemMatcher": [
+				"$msCompile"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Build RDR2 A11y Release",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/d",
+				"/c",
+				"c:\\Users\\hamad\\projects\\rdr2\\rdr2a11y\\build_all.cmd"
+			],
+			"problemMatcher": [
+				"$msCompile"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Build RDR2 A11y Release",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/d",
+				"/c",
+				"c:\\Users\\hamad\\projects\\rdr2\\rdr2a11y\\build_all.cmd"
+			],
+			"problemMatcher": [
+				"$msCompile"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Build RDR2 A11y Release",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/d",
+				"/c",
+				"c:\\Users\\hamad\\projects\\rdr2\\rdr2a11y\\build_all.cmd"
+			],
+			"problemMatcher": [
+				"$msCompile"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Build RDR2 A11y Release",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/d",
+				"/c",
+				"c:\\Users\\hamad\\projects\\rdr2\\rdr2a11y\\build_all.cmd"
+			],
+			"problemMatcher": [
+				"$msCompile"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Build RDR2 A11y Release",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/d",
+				"/c",
+				"c:\\Users\\hamad\\projects\\rdr2\\rdr2a11y\\build_all.cmd"
+			],
+			"problemMatcher": [
+				"$msCompile"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Rebuild after fixes",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/d",
+				"/c",
+				"c:\\Users\\hamad\\projects\\rdr2\\rdr2a11y\\build_all.cmd"
+			],
+			"problemMatcher": [
+				"$msCompile"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Rebuild after disabling PostBuildEvent",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/d",
+				"/c",
+				"c:\\Users\\hamad\\projects\\rdr2\\rdr2a11y\\build_all.cmd"
+			],
+			"problemMatcher": [
+				"$msCompile"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Rebuild after AI namespace fix",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/d",
+				"/c",
+				"c:\\Users\\hamad\\projects\\rdr2\\rdr2a11y\\build_all.cmd"
+			],
+			"problemMatcher": [
+				"$msCompile"
+			],
+			"group": "build"
+		}
+	]
+}

@@ -49,6 +49,7 @@
     <TargetExt>.asi</TargetExt>
     <OutDir>bin\$(Configuration)\</OutDir>
     <IntDir>tmp\$(Configuration)\</IntDir>
+  <PostBuildEventUseInBuild>false</PostBuildEventUseInBuild>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -69,17 +70,9 @@
       <OptimizeReferences>true</OptimizeReferences>
       <AdditionalOptions>..\..\lib\ScriptHookRDR2.lib %(AdditionalOptions)</AdditionalOptions>
     </Link>
+    <!-- PostBuild packaging is handled by build_all.cmd; leave empty to avoid MSBuild cmd parsing issues. -->
     <PostBuildEvent>
       <Command>
-if not exist "$(ProjectDir)..\..\package_RDR2_A11y" mkdir "$(ProjectDir)..\..\package_RDR2_A11y"
-copy /Y "$(TargetPath)" "$(ProjectDir)..\..\package_RDR2_A11y\NativeTrainer.asi" &gt;nul
-if exist "$(TargetDir)tolk.dll" copy /Y "$(TargetDir)tolk.dll" "$(ProjectDir)..\..\package_RDR2_A11y\tolk.dll" &gt;nul
-if not exist "$(ProjectDir)..\..\package_RDR2_A11y\README.txt" (
-  echo Copy both files to your Red Dead Redemption 2 game directory (where RDR2.exe is):&gt;"$(ProjectDir)..\..\package_RDR2_A11y\README.txt"
-  echo - NativeTrainer.asi&gt;&gt;"$(ProjectDir)..\..\package_RDR2_A11y\README.txt"
-  echo - tolk.dll (optional, needed for NVDA/JAWS speech via Tolk)&gt;&gt;"$(ProjectDir)..\..\package_RDR2_A11y\README.txt"
-  echo Ensure ScriptHookRDR2 is installed. NVDA should be running for speech.&gt;&gt;"$(ProjectDir)..\..\package_RDR2_A11y\README.txt"
-)
       </Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
