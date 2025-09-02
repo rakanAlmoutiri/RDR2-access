@@ -14,6 +14,10 @@
 #include <string>
 #include <ctime>
 #include <cmath>
+// GTA11Y-like aiming cues additions
+#include <thread>
+#include <mmsystem.h>
+#pragma comment(lib, "winmm.lib")
 
 using namespace std;
 
@@ -25,28 +29,90 @@ int g_lastKnownMoneyCents = -1;
 // Forward declaration (defined at bottom)
 static bool TryReadHonor(int& outHonor);
 
+// --- GTA11Y-like aiming cues state ---
+static DWORD g_lastAimSoundMs = 0;
+static Entity g_lastAimSoundEntity = 0;
+static bool g_enableAimingWavCues = true;     // can be wired to a menu later
+// (removed) camera pitch beep feature per user request
+static DWORD g_lastHeadCueMs = 0;
+static Entity g_lastHeadEntity = 0;
+
+// Money announcement timing (debounce + min interval)
+// Previously: stable=800ms, minInterval=500ms. Now faster by default.
+static int g_moneyStableMs = 50;       // debounce required for value to be considered stable
+static int g_moneyMinIntervalMs = 50;  // minimum gap between consecutive money announcements
+
+// Navigation/heading announcements
+static bool g_enableAutoZones = true;           // auto announce known/zone names
+static bool g_enableAutoHeading = false;        // auto announce cardinal directions
+static DWORD g_lastHeadingSpeakMs = 0;          // throttle heading speech
+static int g_lastHeadingBucket = -1;            // last 8-way bucket announced
+static wchar_t g_lastZone[128] = {0};           // last zone label announced
+static DWORD g_lastZoneSpeakMs = 0;
+
+// A11y hotkey modes (cycled by NumPad 5)
+enum class A11yMode { Global = 0, Horse = 1, Wolves = 2, Bodyguard = 3 };
+static A11yMode g_a11yMode = A11yMode::Global;
+static inline const wchar_t* ModeName(A11yMode m) {
+	switch (m) {
+	case A11yMode::Global: return L"global";
+	case A11yMode::Horse: return L"horse";
+	case A11yMode::Wolves: return L"wolves";
+	case A11yMode::Bodyguard: return L"bodyguard";
+	default: return L"";
+	}
+}
+
+static inline int HeadingBucket(float h) {
+	// Normalize 0..360, map to 8 buckets (N, NE, E, SE, S, SW, W, NW)
+	while (h < 0) h += 360.0f; while (h >= 360.0f) h -= 360.0f;
+	float step = 360.0f / 8.0f; int b = int((h + step/2) / step) % 8; return b;
+}
+static inline const wchar_t* BucketName8(int b) {
+	static const wchar_t* names[8] = { L"north", L"north east", L"east", L"south east", L"south", L"south west", L"west", L"north west" };
+	if (b < 0 || b > 7) return L""; return names[b];
+}
+
+static inline void PlayWavAsync(const wchar_t* fileName)
+{
+	if (!fileName || !*fileName) return;
+	// Non-blocking, OS-mixed playback; relies on wavs sitting next to the ASI
+	PlaySoundW(fileName, NULL, SND_FILENAME | SND_ASYNC | SND_NODEFAULT);
+}
+
+static inline void BeepAsync(int freq, int durMs)
+{
+	if (freq < 37) freq = 37; // Beep limits
+	if (freq > 32767) freq = 32767;
+	if (durMs < 5) durMs = 5; if (durMs > 200) durMs = 200;
+	std::thread([freq, durMs]() {
+		// Beep is blocking; run in a short-lived detached thread
+		Beep(freq, durMs);
+	}).detach();
+}
+
 // Best-effort wallet reader: prefer CASH natives, then fall back to PED::GET_PED_MONEY
 static int ReadPlayerMoneyCents(Ped me)
 {
 	int best = -1;
 	// Try CASH getters (names unknown in headers; using hashes via wrappers)
 	// These return Any; interpret as int cents if plausible
-	__try {
+	{
 		int v0 = (int)CASH::_0x0C02DABFA3B98176();
 		if (v0 > best) best = v0;
-	} __except(EXCEPTION_EXECUTE_HANDLER) {}
-	__try {
+	}
+	{
 		int v1 = (int)CASH::_0xA46FD001D1BE896C();
 		if (v1 > best) best = v1;
-	} __except(EXCEPTION_EXECUTE_HANDLER) {}
-	__try {
+	}
+	{
 		int v2 = (int)CASH::_0x282D36FF103D78DF();
 		if (v2 > best) best = v2;
-	} __except(EXCEPTION_EXECUTE_HANDLER) {}
-	__try {
+	}
+	{
 		int v3 = (int)CASH::_0x8A67120DBC299525();
 		if (v3 > best) best = v3;
-	} __except(EXCEPTION_EXECUTE_HANDLER) {}
+	}
 	// Fallback: ped money
 	int pedMoney = PED::GET_PED_MONEY(me);
 	if (pedMoney > best) best = pedMoney;
@@ -265,6 +331,53 @@ class MenuItemPlayerSuperJump : public MenuItemSwitchable
 public:
 	MenuItemPlayerSuperJump(string caption)
 		: MenuItemSwitchable(caption) {}
+};
+
+// Accessibility: master speech toggle and targeting cue toggle
+class MenuItemA11yMasterSwitch : public MenuItemSwitchable
+{
+	virtual void OnSelect()
+	{
+		bool newState = !GetState();
+		A11y::setEnabled(newState);
+		SetState(newState);
+	}
+public:
+	MenuItemA11yMasterSwitch(string caption)
+		: MenuItemSwitchable(caption)
+	{
+		SetState(A11y::isEnabled());
+	}
+};
+
+class MenuItemA11yAimingCues : public MenuItemSwitchable
+{
+	virtual void OnSelect()
+	{
+		bool newState = !GetState();
+		g_enableAimingWavCues = newState;
+		SetState(newState);
+	}
+public:
+	MenuItemA11yAimingCues(string caption)
+		: MenuItemSwitchable(caption)
+	{
+		SetState(g_enableAimingWavCues);
+	}
+};
+
+class MenuItemA11yAutoZones : public MenuItemSwitchable
+{
+	virtual void OnSelect() { bool ns = !GetState(); g_enableAutoZones = ns; SetState(ns); }
+public:
+	MenuItemA11yAutoZones(string caption) : MenuItemSwitchable(caption) { SetState(g_enableAutoZones); }
+};
+
+class MenuItemA11yAutoHeading : public MenuItemSwitchable
+{
+	virtual void OnSelect() { bool ns = !GetState(); g_enableAutoHeading = ns; SetState(ns); }
+public:
+	MenuItemA11yAutoHeading(string caption) : MenuItemSwitchable(caption) { SetState(g_enableAutoHeading); }
 };
 
 class MenuItemPlayerNoiseless : public MenuItemSwitchable
@@ -987,7 +1100,7 @@ MenuBase *CreatePlayerTeleportMenu(MenuController *controller)
 
 	menu->AddItem(new MenuItemPlayerTeleportToMarker("MARKER"));
 
-	menu->AddItem(new MenuItemPlayerTeleport("SOUTH MAP",     { -5311.2583,  -4612.00,   -10.63389 }));
+menu->AddItem(new MenuItemPlayerTeleport("SOUTH MAP",     { -5311.2583,  -4612.00,   -10.63389 }));
 	menu->AddItem(new MenuItemPlayerTeleport("SOUTH GUAMA",   { 1315.66381,  -6815.48,   42.377101 }));
 	menu->AddItem(new MenuItemPlayerTeleport("ANNESBURG",     { 2898.593994, 1239.85253, 44.073299 }));
 	menu->AddItem(new MenuItemPlayerTeleport("STRAWBERRY",	  { -1725.22143, -418.11560, 153.55740 }));
@@ -1435,6 +1548,27 @@ MenuBase *CreateMiscMenu(MenuController *controller)
 	return menu;
 }
 
+MenuBase *CreateAccessibilityMenu(MenuController *controller)
+{
+	auto menu = new MenuBase(new MenuItemTitle("ACCESSIBILITY"));
+	controller->RegisterMenu(menu);
+
+	// Top-level master speech switch (default ON)
+	menu->AddItem(new MenuItemA11yMasterSwitch("Enable accessibility (speech)"));
+
+	// Group: Aiming
+	menu->AddItem(new MenuItemTitle("AIMING"));
+	menu->AddItem(new MenuItemA11yAimingCues("Target type sound cues"));
+
+	// Group: Navigation
+	menu->AddItem(new MenuItemTitle("NAVIGATION"));
+	menu->AddItem(new MenuItemA11yAutoZones("Auto place/zone announcements"));
+	menu->AddItem(new MenuItemA11yAutoHeading("Auto heading announcements"));
+
+	// Future groups can be added here (navigation, combat assist, etc.)
+	return menu;
+}
+
 MenuBase *CreateMainMenu(MenuController *controller)
 {
 	auto menu = new MenuBase(new MenuItemTitle("NATIVE  TRAINER  (AB)"));
@@ -1449,6 +1583,7 @@ MenuBase *CreateMainMenu(MenuController *controller)
 	menu->AddItem(new MenuItemMenu("TIME", CreateTimeMenu(controller)));
 	menu->AddItem(new MenuItemMenu("WEATHER", CreateWeatherMenu(controller)));
 	menu->AddItem(new MenuItemMenu("MISC", CreateMiscMenu(controller)));
+	menu->AddItem(new MenuItemMenu("ACCESSIBILITY", CreateAccessibilityMenu(controller)));
 	
 	return menu;
 }
@@ -1556,8 +1691,8 @@ void main()
 			// Deferred: no immediate speech on open to avoid early-load issues.
 		}
 
-		// NumPad 1: announce player's health (only when menu is closed)
-		if (!menuController->HasActiveMenu() && IsKeyJustUp(VK_NUMPAD1))
+		// NumPad 1 (Global): announce player's health
+		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Global && IsKeyJustUp(VK_NUMPAD1))
 		{
 			Ped playerPed = PLAYER::PLAYER_PED_ID();
 			int health = ENTITY::GET_ENTITY_HEALTH(playerPed);
@@ -1645,8 +1780,8 @@ void main()
 			A11y::speak(wctx, false);
 		}
 
-		// NumPad 2: announce what you're riding/driving (only when menu is closed)
-		if (!menuController->HasActiveMenu() && IsKeyJustUp(VK_NUMPAD2))
+		// NumPad 2 (Global): announce what you're riding/driving
+		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Global && IsKeyJustUp(VK_NUMPAD2))
 		{
 			Ped playerPed = PLAYER::PLAYER_PED_ID();
 			std::wstring wout;
@@ -1688,7 +1823,7 @@ void main()
 				float spd = ENTITY::GET_ENTITY_SPEED(veh) * 3.6f; // km/h
 				int ispd = static_cast<int>(spd + 0.5f);
 				wchar_t wmodel[96]; wmodel[0] = L'\0';
-				if (!modelName.empty()) { size_t n = modelName.size(); if (n > 95) n = 95; mbstowcs(wmodel, modelName.c_str(), n); wmodel[n] = L'\0'; }
+				if (!modelName.empty()) { size_t n = modelName.size(); if (n > 95) n = 95; size_t cv = 0; mbstowcs_s(&cv, wmodel, 96, modelName.c_str(), n); wmodel[n] = L'\0'; }
 				wchar_t buf[160];
 				if (wmodel[0]) swprintf_s(buf, L"%hs: %s, speed %d", kind.c_str(), wmodel, ispd);
 				else swprintf_s(buf, L"%hs, speed %d", kind.c_str(), ispd);
@@ -1701,8 +1836,8 @@ void main()
 			if (!wout.empty()) A11y::speak(wout, true);
 			after_num2:;
 		}
-		// NumPad 4: feed horse (accessible alternative to vanilla menu)
-		if (!menuController->HasActiveMenu() && IsKeyJustUp(VK_NUMPAD4))
+		// NumPad 4: feed horse (Horse mode)
+		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Horse && IsKeyJustUp(VK_NUMPAD4))
 		{
 			Ped playerPed = PLAYER::PLAYER_PED_ID();
 			if (PED::IS_PED_ON_MOUNT(playerPed))
@@ -1731,33 +1866,78 @@ void main()
 			}
 		}
 
-		// NumPad 5: brush horse (clean wetness as simple accessible proxy)
+	// NumPad 5: Cycle A11y mode (Global -> Horse -> Wolves -> Bodyguard)
 		if (!menuController->HasActiveMenu() && IsKeyJustUp(VK_NUMPAD5))
 		{
-			Ped playerPed = PLAYER::PLAYER_PED_ID();
-			if (PED::IS_PED_ON_MOUNT(playerPed))
-			{
-				Ped horse = PED::GET_MOUNT(playerPed);
-				if (ENTITY::DOES_ENTITY_EXIST(horse) && !ENTITY::IS_ENTITY_DEAD(horse))
-				{
-					PED::CLEAR_PED_WETNESS(horse);
-					A11y::speak(L"brushed horse", true);
-				}
-				else
-				{
-					A11y::speak(L"no valid horse", true);
-				}
+			int m = (int)g_a11yMode;
+			m = (m + 1) % 4;
+			g_a11yMode = (A11yMode)m;
+			const wchar_t* name = ModeName(g_a11yMode);
+			wchar_t buf[64]; swprintf_s(buf, L"mode: %s", name);
+			A11y::speak(buf, true);
+		}
+
+	// Horse mode shortcuts: brush (3), feed (4)
+		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Horse)
+		{
+			// 1: horse status (health + stamina)
+			if (IsKeyJustUp(VK_NUMPAD1)) {
+				Ped me = PLAYER::PLAYER_PED_ID();
+				if (PED::IS_PED_ON_MOUNT(me)) {
+					Ped h = PED::GET_MOUNT(me);
+					if (ENTITY::DOES_ENTITY_EXIST(h) && !ENTITY::IS_ENTITY_DEAD(h)) {
+						int hp = ENTITY::GET_ENTITY_HEALTH(h);
+						int mh = PED::GET_PED_MAX_HEALTH(h); if (mh <= 0) mh = 1; if (hp > mh) hp = mh;
+						int pct = (int)((hp * 100.0f) / (float)mh + 0.5f);
+						wchar_t buf[96]; swprintf_s(buf, L"horse health %d (%d%%), stamina 100%%", hp, pct);
+						A11y::speak(buf, true);
+					} else A11y::speak(L"no valid horse", true);
+				} else A11y::speak(L"not on horse", true);
 			}
-			else
-			{
-				A11y::speak(L"not on horse", true);
+			// 2: horse location (zone)
+			if (IsKeyJustUp(VK_NUMPAD2)) {
+				Ped me = PLAYER::PLAYER_PED_ID(); Vector3 c = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
+				const char* gxt = reinterpret_cast<const char*>(static_cast<uintptr_t>(ZONE::_0x43AD8FC02B429D33(c.x, c.y, c.z, 0)));
+				const char* text = nullptr;
+				if (gxt && *gxt) {
+					// If this is a GXT key, translate it; otherwise, treat as already-localized text
+					if (UI::DOES_TEXT_LABEL_EXIST(const_cast<char*>(gxt))) {
+						text = UI::_GET_LABEL_TEXT(const_cast<char*>(gxt));
+					} else {
+						text = gxt;
+					}
+				}
+				if (text && *text) { wchar_t w[128]; size_t n=strlen(text); if(n>127)n=127; size_t cv=0; mbstowcs_s(&cv,w,128,text,n); w[n]=L'\0'; A11y::speak(w, true);} else A11y::speak(L"unknown", true);
+			}
+			if (IsKeyJustUp(VK_NUMPAD3)) {
+				Ped playerPed = PLAYER::PLAYER_PED_ID();
+				if (PED::IS_PED_ON_MOUNT(playerPed)) {
+					Ped horse = PED::GET_MOUNT(playerPed);
+					if (ENTITY::DOES_ENTITY_EXIST(horse) && !ENTITY::IS_ENTITY_DEAD(horse)) { PED::CLEAR_PED_WETNESS(horse); A11y::speak(L"brushed horse", true); }
+					else { A11y::speak(L"no valid horse", true); }
+				} else { A11y::speak(L"not on horse", true); }
+			}
+			if (IsKeyJustUp(VK_NUMPAD4)) {
+				Ped playerPed = PLAYER::PLAYER_PED_ID();
+				if (PED::IS_PED_ON_MOUNT(playerPed)) {
+					Ped horse = PED::GET_MOUNT(playerPed);
+					if (ENTITY::DOES_ENTITY_EXIST(horse) && !ENTITY::IS_ENTITY_DEAD(horse)) {
+						int h = ENTITY::GET_ENTITY_HEALTH(horse);
+						int mh = PED::GET_PED_MAX_HEALTH(horse); if (mh <= 0) mh = 1; if (h > mh) h = mh;
+						int add = mh / 4; if (add < 10) add = 10; int newH = h + add; if (newH > mh) newH = mh; ENTITY::SET_ENTITY_HEALTH(horse, newH, FALSE);
+						PED::SET_PED_STAMINA(horse, 100.0);
+						int pct = static_cast<int>((newH * 100.0f) / static_cast<float>(mh) + 0.5f); if (pct > 100) pct = 100; if (pct < 0) pct = 0;
+						wchar_t buf[128]; swprintf_s(buf, L"fed horse, health %d (%d%%), stamina 100%%", newH, pct);
+						A11y::speak(buf, true);
+					} else { A11y::speak(L"no valid horse", true); }
+				} else { A11y::speak(L"not on horse", true); }
 			}
 		}
 
 		// Removed on-demand camera scan (NumPad 0); automatic announcements occur while aiming only
 
-	// NumPad 3: on-demand current weapon info (name only)
-		if (!menuController->HasActiveMenu() && IsKeyJustUp(VK_NUMPAD3))
+	// NumPad 3 (Global): on-demand current weapon info (name only)
+		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Global && IsKeyJustUp(VK_NUMPAD3))
 		{
 			Ped ped = PLAYER::PLAYER_PED_ID();
 			if (!ENTITY::DOES_ENTITY_EXIST(ped)) { A11y::speak(L"unarmed", true); goto after_num3; }
@@ -1772,7 +1952,7 @@ void main()
 					if (wh == cur) { uname = info.uiname; break; }
 				}
 		wchar_t wname[96]; wname[0] = L'\0';
-		if (!uname.empty()) { size_t n = uname.size(); if (n > 95) n = 95; mbstowcs(wname, uname.c_str(), n); wname[n] = L'\0'; }
+			if (!uname.empty()) { size_t n = uname.size(); if (n > 95) n = 95; size_t cv = 0; mbstowcs_s(&cv, wname, 96, uname.c_str(), n); wname[n] = L'\0'; }
 		if (wname[0]) A11y::speak(wname, true);
 		else A11y::speak(L"weapon", true);
 			}
@@ -1783,8 +1963,8 @@ void main()
 			after_num3:;
 		}
 
-		// NumPad 6: on-demand money total (USD dollars)
-		if (!menuController->HasActiveMenu() && IsKeyJustUp(VK_NUMPAD6))
+	// NumPad 6 (Global): on-demand money total (USD dollars)
+		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Global && IsKeyJustUp(VK_NUMPAD6))
 		{
 			Ped me = PLAYER::PLAYER_PED_ID();
 			if (ENTITY::DOES_ENTITY_EXIST(me)) {
@@ -1799,8 +1979,8 @@ void main()
 			}
 		}
 
-		// NumPad 8: toggle bodyguard (spawn/dismiss)
-		if (!menuController->HasActiveMenu() && IsKeyJustUp(VK_NUMPAD8))
+	// NumPad 4: toggle bodyguard (Bodyguard mode only)
+	if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Bodyguard && IsKeyJustUp(VK_NUMPAD4))
 		{
 			if (g_bodyguard && ENTITY::DOES_ENTITY_EXIST(g_bodyguard))
 			{
@@ -1850,8 +2030,75 @@ void main()
 			after_bg_toggle:;
 		}
 
-		// NumPad 9: toggle wolf companion (spawn/dismiss)
-		if (!menuController->HasActiveMenu() && IsKeyJustUp(VK_NUMPAD9))
+	// Bodyguard mode: 1 status, 2 teleport to player, 3 follow close
+		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Bodyguard)
+		{
+			if (IsKeyJustUp(VK_NUMPAD1)) {
+				if (g_bodyguard && ENTITY::DOES_ENTITY_EXIST(g_bodyguard) && !ENTITY::IS_ENTITY_DEAD(g_bodyguard)) {
+					int hp = ENTITY::GET_ENTITY_HEALTH(g_bodyguard);
+					int mh = PED::GET_PED_MAX_HEALTH(g_bodyguard); if (mh<=0) mh=1; if (hp>mh) hp=mh; int pct=(int)((hp*100.0f)/(float)mh+0.5f);
+					wchar_t buf[80]; swprintf_s(buf, L"bodyguard health %d (%d%%)", hp, pct); A11y::speak(buf, true);
+				} else A11y::speak(L"no bodyguard", true);
+			}
+			if (IsKeyJustUp(VK_NUMPAD2)) {
+				if (g_bodyguard && ENTITY::DOES_ENTITY_EXIST(g_bodyguard)) {
+					Ped me = PLAYER::PLAYER_PED_ID(); Vector3 p = ENTITY::GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS(me, 0.0f, -1.4f, 0.0f);
+					ENTITY::SET_ENTITY_COORDS(g_bodyguard, p.x, p.y, p.z, FALSE, FALSE, FALSE, TRUE);
+					A11y::speak(L"bodyguard here", true);
+				} else A11y::speak(L"no bodyguard", true);
+			}
+			if (IsKeyJustUp(VK_NUMPAD3)) {
+				if (g_bodyguard && ENTITY::DOES_ENTITY_EXIST(g_bodyguard)) {
+					Ped me = PLAYER::PLAYER_PED_ID(); AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(g_bodyguard, me, 0.0f, -1.4f, 0.0f, 3.0f, -1, 1.5f, TRUE, FALSE, FALSE, FALSE, FALSE);
+					g_bodyguardLastTaskMs = GetTickCount(); A11y::speak(L"following", true);
+				} else A11y::speak(L"no bodyguard", true);
+			}
+		}
+
+		// Wolves mode: 1 status, 2 gather, 3 call/regroup, 4 toggle, 6 attack, 7 increase, 8 decrease
+		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Wolves)
+		{
+			// 1: status
+			if (IsKeyJustUp(VK_NUMPAD1)) {
+				if (g_wolf && ENTITY::DOES_ENTITY_EXIST(g_wolf) && !ENTITY::IS_ENTITY_DEAD(g_wolf)) {
+					int hp = ENTITY::GET_ENTITY_HEALTH(g_wolf); int mh = PED::GET_PED_MAX_HEALTH(g_wolf); if(mh<=0) mh=1; if(hp>mh) hp=mh; int pct=(int)((hp*100.0f)/(float)mh+0.5f);
+					wchar_t buf[64]; swprintf_s(buf, L"wolf health %d (%d%%)", hp, pct); A11y::speak(buf, true);
+				} else A11y::speak(L"no wolf", true);
+			}
+			// 2: gather
+			if (IsKeyJustUp(VK_NUMPAD2)) {
+				if (g_wolf && ENTITY::DOES_ENTITY_EXIST(g_wolf) && !ENTITY::IS_ENTITY_DEAD(g_wolf)) {
+					Ped me = PLAYER::PLAYER_PED_ID(); if (ENTITY::DOES_ENTITY_EXIST(me)) {
+						AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(g_wolf, me, -0.5f, -1.6f, 0.0f, 3.2f, 2500, 1.5f, TRUE, FALSE, FALSE, FALSE, FALSE);
+						for (int i=0;i<g_wolfPackSize;++i){ Ped wp=g_wolfPack[i]; if(!wp||ENTITY::IS_ENTITY_DEAD(wp)) continue; AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(wp, me, -0.6f, -2.0f, 0.0f, 3.0f, 2500, 1.5f, TRUE, FALSE, FALSE, FALSE, FALSE);} A11y::speak(L"gather", true);
+					}
+				} else A11y::speak(L"no wolf", true);
+			}
+			// 3: call/regroup near player
+			if (IsKeyJustUp(VK_NUMPAD3)) {
+				if (!(g_wolf && ENTITY::DOES_ENTITY_EXIST(g_wolf) && !ENTITY::IS_ENTITY_DEAD(g_wolf))) { A11y::speak(L"no wolf", true); }
+				else {
+					Ped me = PLAYER::PLAYER_PED_ID();
+					bool didCall = TryPlayerCall(me);
+					TryFrontendBeep();
+					g_forcedHowlAll = true; g_forcedHowlAtMs = GetTickCount() + 500;
+					int maxAllowed = (g_targetPackSize > 0 ? g_targetPackSize : MAX_WOLF_PACK);
+					if (g_wolfPackSize < maxAllowed) { g_howlsRemaining = (g_howlsRemaining < 2 ? 2 : g_howlsRemaining); g_nextHowlAtMs = GetTickCount(); }
+					A11y::speak(didCall ? L"calling" : L"call", true);
+					if (ENTITY::DOES_ENTITY_EXIST(me)) {
+						AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(g_wolf, me, -0.5f, -1.6f, 0.0f, 3.2f, 2000, 1.5f, TRUE, FALSE, FALSE, FALSE, FALSE);
+						g_wolfLastTaskMs = GetTickCount();
+						for (int i = 0; i < g_wolfPackSize; ++i) {
+							Ped wp = g_wolfPack[i]; if (!wp || ENTITY::IS_ENTITY_DEAD(wp)) continue;
+							AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(wp, me, -0.6f, -2.0f, 0.0f, 3.2f, 2000, 1.5f, TRUE, FALSE, FALSE, FALSE, FALSE);
+						}
+					}
+				}
+			}
+		}
+
+		// NumPad 4: toggle wolf companion (Wolves mode only)
+		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Wolves && IsKeyJustUp(VK_NUMPAD4))
 		{
 			if (g_wolf && ENTITY::DOES_ENTITY_EXIST(g_wolf))
 			{
@@ -1901,8 +2148,8 @@ void main()
 			after_wolf_toggle:;
 		}
 
-		// NumPad - : decrease persistent pack size by one and dismiss one extra helper immediately
-		if (!menuController->HasActiveMenu() && IsKeyJustUp(VK_SUBTRACT))
+		// NumPad 8: decrease persistent pack size (Wolves mode only)
+		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Wolves && IsKeyJustUp(VK_NUMPAD8))
 		{
 			if (g_targetPackSize > 0) {
 				g_targetPackSize -= 1; if (g_targetPackSize < 0) g_targetPackSize = 0;
@@ -1918,60 +2165,66 @@ void main()
 					}
 					g_wolfPack[idx] = 0; g_wolfPackSize -= 1;
 				}
-				wchar_t buf[64]; swprintf_s(buf, L"pack %d", g_targetPackSize);
-				A11y::speak(buf, true);
-			} else {
-				A11y::speak(L"pack 0", true);
 			}
+			wchar_t buf[64]; swprintf_s(buf, L"pack %d", g_targetPackSize);
+			A11y::speak(buf, true);
 		}
 
-		// NumPad 0: command attack on aimed target (wolf first, then human)
-		if (!menuController->HasActiveMenu() && IsKeyJustUp(VK_NUMPAD0))
+		// NumPad 9: speak pack status (Wolves mode only)
+		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Wolves && IsKeyJustUp(VK_NUMPAD9))
+		{
+			wchar_t buf[64]; swprintf_s(buf, L"pack %d", g_wolfPackSize);
+			A11y::speak(buf, true);
+		}
+
+	// NumPad 6: Wolves mode -> command attack
+	if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Wolves && IsKeyJustUp(VK_NUMPAD6))
 		{
 			Entity t = 0; Player pl = PLAYER::PLAYER_ID();
-			if (!PLAYER::GET_ENTITY_PLAYER_IS_FREE_AIMING_AT(pl, &t) || !ENTITY::DOES_ENTITY_EXIST(t))
-			{
-				// fallback to melee target
+			if (!PLAYER::GET_ENTITY_PLAYER_IS_FREE_AIMING_AT(pl, &t) || !ENTITY::DOES_ENTITY_EXIST(t)) {
 				Ped me = PLAYER::PLAYER_PED_ID(); Ped mt = PED::GET_MELEE_TARGET_FOR_PED(me); if (mt && ENTITY::DOES_ENTITY_EXIST(mt)) t = mt;
-				// fallback to last auto-announced entity under aim
 				if ((!t || !ENTITY::DOES_ENTITY_EXIST(t)) && lastAimedEntity && ENTITY::DOES_ENTITY_EXIST(lastAimedEntity)) t = lastAimedEntity;
 			}
-			if (t && ENTITY::DOES_ENTITY_EXIST(t) && ENTITY::IS_ENTITY_A_PED(t))
-			{
+			if (t && ENTITY::DOES_ENTITY_EXIST(t) && ENTITY::IS_ENTITY_A_PED(t)) {
 				bool wolfReady = (g_wolf && ENTITY::DOES_ENTITY_EXIST(g_wolf) && !ENTITY::IS_ENTITY_DEAD(g_wolf));
 				bool guardReady = (g_bodyguard && ENTITY::DOES_ENTITY_EXIST(g_bodyguard) && !ENTITY::IS_ENTITY_DEAD(g_bodyguard));
-				if (wolfReady)
-				{
-					// Ensure immediate, aggressive pursuit regardless of relation
+				if (wolfReady) {
 					PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(g_wolf, TRUE);
 					PED::SET_PED_COMBAT_ABILITY(g_wolf, 2);
 					PED::SET_PED_COMBAT_MOVEMENT(g_wolf, 2);
 					PED::SET_PED_FLEE_ATTRIBUTES(g_wolf, 0, FALSE);
 					AI::TASK_COMBAT_PED(g_wolf, (Ped)t, 0, 0);
-					g_pendingAttackTarget = t; // after wolf falls, human will engage
-					A11y::speak(L"wolf attacking", true);
-				}
-				else if (guardReady)
-				{
-					// brief threat then engage
+					g_pendingAttackTarget = t; A11y::speak(L"wolf attacking", true);
+				} else if (guardReady) {
 					AI::TASK_GOTO_ENTITY_AIMING(g_bodyguard, t, 18.0f, 25.0f);
-					g_humanThreatUntilMs = GetTickCount() + 1500;
-					g_pendingAttackTarget = t;
-					A11y::speak(L"bodyguard attacking", true);
+					g_humanThreatUntilMs = GetTickCount() + 1500; g_pendingAttackTarget = t; A11y::speak(L"bodyguard attacking", true);
+				} else { A11y::speak(L"no companion", true); }
+			} else { A11y::speak(L"no target", true); }
+		}
+
+		// NumPad 4 (Global): On-demand location (zone/place)
+		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Global && IsKeyJustUp(VK_NUMPAD4))
+		{
+			Ped me = PLAYER::PLAYER_PED_ID(); if (ENTITY::DOES_ENTITY_EXIST(me)) {
+				Vector3 meC = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
+				const char* gxt = reinterpret_cast<const char*>(static_cast<uintptr_t>(ZONE::_0x43AD8FC02B429D33(meC.x, meC.y, meC.z, 0)));
+				const char* text = nullptr;
+				if (gxt && *gxt) {
+					if (UI::DOES_TEXT_LABEL_EXIST(const_cast<char*>(gxt))) {
+						text = UI::_GET_LABEL_TEXT(const_cast<char*>(gxt));
+					} else {
+						text = gxt;
+					}
 				}
-				else
-				{
-					A11y::speak(L"no companion", true);
-				}
-			}
-			else
-			{
-				A11y::speak(L"no target", true);
+				if (text && *text) {
+					wchar_t wlab[128]; size_t n = strlen(text); if (n > 127) n = 127; size_t converted=0; mbstowcs_s(&converted, wlab, 128, text, n);
+					wlab[n] = L'\0'; A11y::speak(wlab, true);
+				} else { A11y::speak(L"unknown", true); }
 			}
 		}
 
-		// NumPad 7/Home: on-demand honor + bounty/wanted status (Home when NumLock is off)
-		if (!menuController->HasActiveMenu() && (IsKeyJustUp(VK_NUMPAD7) || IsKeyJustUp(VK_HOME)))
+		// NumPad 7/Home (Global): on-demand honor + bounty/wanted status (Home when NumLock is off)
+		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Global && (IsKeyJustUp(VK_NUMPAD7) || IsKeyJustUp(VK_HOME)))
 		{
 			static int lastHonor = INT_MIN; static DWORD lastHonorChangeMs = 0;
 			int honor = 0; bool okHonor = TryReadHonor(honor);
@@ -2001,8 +2254,8 @@ void main()
 			A11y::speak(buf, true);
 		}
 
-		// NumPad *: make wolf howl and call in more pack members up to a cap
-		if (!menuController->HasActiveMenu() && IsKeyJustUp(VK_MULTIPLY))
+	// NumPad 7: Wolves mode — make wolf howl and call pack (increase desired pack)
+	if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Wolves && IsKeyJustUp(VK_NUMPAD7))
 		{
 			if (g_wolf && ENTITY::DOES_ENTITY_EXIST(g_wolf) && !ENTITY::IS_ENTITY_DEAD(g_wolf))
 			{
@@ -2031,26 +2284,88 @@ void main()
 			}
 		}
 
-		// NumPad . (Decimal): Player calls first, then force all wolves to howl (audible)
+		// NumPad .: Global -> speak heading only
 		if (!menuController->HasActiveMenu() && IsKeyJustUp(VK_DECIMAL))
 		{
-			Ped me = PLAYER::PLAYER_PED_ID();
-			bool didCall = TryPlayerCall(me);
-			TryFrontendBeep(); // audible cue for the call
-			g_forcedHowlAll = true; g_forcedHowlAtMs = GetTickCount() + 500; // wolves answer after half a second
-			// Also kick a short howl cadence to help gather or replenish, but don't exceed target cap
-			int maxAllowed = (g_targetPackSize > 0 ? g_targetPackSize : MAX_WOLF_PACK);
-			if (g_wolfPackSize < maxAllowed) { g_howlsRemaining = (g_howlsRemaining < 2 ? 2 : g_howlsRemaining); g_nextHowlAtMs = GetTickCount(); }
-			A11y::speak(didCall ? L"calling" : L"call", true);
-			// Rally the wolf and pack to player for a short time
-			if (ENTITY::DOES_ENTITY_EXIST(me)) {
-				if (g_wolf && ENTITY::DOES_ENTITY_EXIST(g_wolf) && !ENTITY::IS_ENTITY_DEAD(g_wolf)) {
-					AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(g_wolf, me, -0.5f, -1.6f, 0.0f, 3.2f, 2000, 1.5f, TRUE, FALSE, FALSE, FALSE, FALSE);
-					g_wolfLastTaskMs = GetTickCount();
+			if (g_a11yMode == A11yMode::Global) {
+				Vector3 camRot = CAM::GET_GAMEPLAY_CAM_ROT(2);
+				int b = HeadingBucket(camRot.z);
+				const wchar_t* wname = BucketName8(b);
+				if (wname && *wname) A11y::speak(wname, true); else A11y::speak(L"heading", true);
+			}
+		}
+
+		// NumPad 0: Clear/dismiss helper pack (keep main wolf)
+		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Wolves && IsKeyJustUp(VK_NUMPAD0))
+		{
+			g_targetPackSize = 0;
+			for (int i = 0; i < g_wolfPackSize; ++i) {
+				Ped wp = g_wolfPack[i];
+				if (wp && ENTITY::DOES_ENTITY_EXIST(wp)) {
+					Vector3 wph = ENTITY::GET_ENTITY_COORDS(wp, TRUE, FALSE);
+					AI::CLEAR_PED_TASKS_IMMEDIATELY(wp, TRUE, TRUE);
+					AI::TASK_WANDER_IN_AREA(wp, wph.x, wph.y, wph.z, 50.0f, 3.0f, 6.0f, TRUE);
+					ENTITY::SET_PED_AS_NO_LONGER_NEEDED(&wp);
 				}
-				for (int i = 0; i < g_wolfPackSize; ++i) {
-					Ped wp = g_wolfPack[i]; if (!wp || ENTITY::IS_ENTITY_DEAD(wp)) continue;
-					AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(wp, me, -0.6f, -2.0f, 0.0f, 3.2f, 2000, 1.5f, TRUE, FALSE, FALSE, FALSE, FALSE);
+				g_wolfPack[i] = 0;
+			}
+			g_wolfPackSize = 0; g_howlsRemaining = 0; g_nextHowlAtMs = 0;
+			A11y::speak(L"pack 0", true);
+		}
+
+		// Global: also allow heading on Numpad 8 for sequential layout lovers
+		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Global && IsKeyJustUp(VK_NUMPAD8))
+		{
+			Vector3 camRot = CAM::GET_GAMEPLAY_CAM_ROT(2);
+			int b = HeadingBucket(camRot.z);
+			const wchar_t* wname = BucketName8(b);
+			if (wname && *wname) A11y::speak(wname, true); else A11y::speak(L"heading", true);
+		}
+
+		// Auto-navigation announcements: zone/place and heading
+		if (!menuController->HasActiveMenu())
+		{
+			DWORD now = GetTickCount();
+			// Zone/place change announcement
+			if (g_enableAutoZones)
+			{
+				Ped me = PLAYER::PLAYER_PED_ID();
+				if (ENTITY::DOES_ENTITY_EXIST(me)) {
+					Vector3 meC = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
+					// Call hashed native directly to avoid modifying headers
+					const char* gxt = reinterpret_cast<const char*>(static_cast<uintptr_t>(ZONE::_0x43AD8FC02B429D33(meC.x, meC.y, meC.z, 0)));
+					const char* text = nullptr;
+					if (gxt && *gxt) {
+						if (UI::DOES_TEXT_LABEL_EXIST(const_cast<char*>(gxt))) {
+							text = UI::_GET_LABEL_TEXT(const_cast<char*>(gxt));
+						} else {
+							text = gxt;
+						}
+					}
+					if (text && *text) {
+						wchar_t wlab[128]; wlab[0] = L'\0';
+						size_t n = strlen(text); if (n > 127) n = 127; size_t converted=0; mbstowcs_s(&converted, wlab, 128, text, n);
+						if (wlab[0]) {
+							if (wcscmp(wlab, g_lastZone) != 0 && (now - g_lastZoneSpeakMs) > 600) {
+								wcsncpy_s(g_lastZone, wlab, _TRUNCATE);
+								g_lastZoneSpeakMs = now;
+								A11y::speak(wlab, true);
+							}
+						}
+					}
+				}
+			}
+			// Heading announcements (8-way cardinal) on bucket change
+			if (g_enableAutoHeading)
+			{
+				// Use camera heading for player orientation
+				Vector3 camRot = CAM::GET_GAMEPLAY_CAM_ROT(2);
+				float heading = camRot.z; // degrees
+				int b = HeadingBucket(heading);
+				if (b != g_lastHeadingBucket && (now - g_lastHeadingSpeakMs) > 450) {
+					g_lastHeadingBucket = b; g_lastHeadingSpeakMs = now;
+					const wchar_t* wname = BucketName8(b);
+					if (wname && *wname) A11y::speak(wname, true);
 				}
 			}
 		}
@@ -2075,8 +2390,8 @@ void main()
 					int cur = ReadPlayerMoneyCents(me);
 					DWORD now = GetTickCount();
 					if (cur != moneyCandidate) { moneyCandidate = cur; moneyCandidateSinceMs = now; }
-					bool stable = (now - moneyCandidateSinceMs >= 800);
-					if (stable && cur != lastMoneyCents && (now - lastMoneyAnnounceMs > 500)) {
+					bool stable = (now - moneyCandidateSinceMs >= g_moneyStableMs);
+					if (stable && cur != lastMoneyCents && (now - lastMoneyAnnounceMs > g_moneyMinIntervalMs)) {
 						int delta = (lastMoneyCents >= 0) ? (cur - lastMoneyCents) : 0;
 						lastDeltaCents = delta;
 						// Format as dollars.cents
@@ -2096,8 +2411,8 @@ void main()
 									if (dist <= 25.0f) { wcsncpy_s(src, lastTargetPedForMoneyName, _TRUNCATE); attributed = true; }
 								}
 							}
-							if (attributed && src[0]) swprintf_s(buf, L"%s gave you %d.%02d$ — You have %d.%02d$", src, d_dollars, d_cents, t_dollars, t_cents);
-							else swprintf_s(buf, L"You received %d.%02d$ — You have %d.%02d$", d_dollars, d_cents, t_dollars, t_cents);
+							if (attributed && src[0]) swprintf_s(buf, L"%s gave you %d.%02d$ - You have %d.%02d$", src, d_dollars, d_cents, t_dollars, t_cents);
+							else swprintf_s(buf, L"You received %d.%02d$ - You have %d.%02d$", d_dollars, d_cents, t_dollars, t_cents);
 						}
 						else if (delta < 0) swprintf_s(buf, L"You spent %d.%02d$", d_dollars, d_cents);
 						else swprintf_s(buf, L"You have %d.%02d$", t_dollars, t_cents);
@@ -2412,7 +2727,7 @@ void main()
 							if (wh == cur) { uname = info.uiname; break; }
 						}
 						wchar_t wname[96]; wname[0] = L'\0';
-						if (!uname.empty()) { size_t n = uname.size(); if (n > 95) n = 95; mbstowcs(wname, uname.c_str(), n); wname[n] = L'\0'; }
+						if (!uname.empty()) { size_t n = uname.size(); if (n > 95) n = 95; size_t cv = 0; mbstowcs_s(&cv, wname, 96, uname.c_str(), n); wname[n] = L'\0'; }
 						if (wname[0]) A11y::speak(wname, true);
 						else A11y::speak(L"weapon", true);
 					}
@@ -2522,6 +2837,71 @@ void main()
 				Entity target = isAimingOrTargeting ? selectPreferredTarget() : 0;
 				if (target && ENTITY::DOES_ENTITY_EXIST(target))
 				{
+					// If aiming at a ped, check if crosshair aligns with the head bone
+					if (ENTITY::IS_ENTITY_A_PED(target) && !ENTITY::IS_ENTITY_DEAD(target))
+					{
+						// Resolve head bone index (try common names)
+						int headIdx = -1;
+						if (headIdx < 0) headIdx = ENTITY::GET_ENTITY_BONE_INDEX_BY_NAME(target, const_cast<char*>("SKEL_Head"));
+						if (headIdx < 0) headIdx = ENTITY::GET_ENTITY_BONE_INDEX_BY_NAME(target, const_cast<char*>("HEAD"));
+						if (headIdx >= 0)
+						{
+							Vector3 headPos = ENTITY::GET_WORLD_POSITION_OF_ENTITY_BONE(target, headIdx);
+							Vector3 camPos = CAM::GET_GAMEPLAY_CAM_COORD();
+							Vector3 camRot = CAM::GET_GAMEPLAY_CAM_ROT(2);
+							float radX = camRot.x * static_cast<float>(3.14159265358979323846 / 180.0);
+							float radZ = camRot.z * static_cast<float>(3.14159265358979323846 / 180.0);
+							Vector3 dir = { -sinf(radZ) * cosf(radX), cosf(radZ) * cosf(radX), sinf(radX) };
+							// Normalize dir
+							float dlen = sqrtf(dir.x*dir.x + dir.y*dir.y + dir.z*dir.z);
+							if (dlen > 0.0001f) { dir.x/=dlen; dir.y/=dlen; dir.z/=dlen; }
+							// Vector from cam to head
+							Vector3 w = { headPos.x - camPos.x, headPos.y - camPos.y, headPos.z - camPos.z };
+							float proj = w.x*dir.x + w.y*dir.y + w.z*dir.z; // along-ray distance
+							if (proj > 0.0f)
+							{
+								// Perpendicular distance to ray = |w x dir|
+								Vector3 cross = { w.y*dir.z - w.z*dir.y, w.z*dir.x - w.x*dir.z, w.x*dir.y - w.y*dir.x };
+								float dist = sqrtf(cross.x*cross.x + cross.y*cross.y + cross.z*cross.z);
+								// Threshold ~22cm feels like head-width tolerance
+								if (dist < 0.22f)
+								{
+									DWORD now = GetTickCount();
+									if (target != g_lastHeadEntity || (now - g_lastHeadCueMs) > 220)
+									{
+										// Optional distinct cue; keep it short
+										BeepAsync(1450, 28);
+										A11y::speak(L"head", true);
+										g_lastHeadEntity = target;
+										g_lastHeadCueMs = now;
+									}
+								}
+							}
+						}
+					}
+
+					// GTA11Y-like short ping for target class (ped/vehicle/prop)
+					if (g_enableAimingWavCues)
+					{
+						DWORD now = GetTickCount();
+						if (now - g_lastAimSoundMs > 180 || target != g_lastAimSoundEntity)
+						{
+							wchar_t wavPath[MAX_PATH]; wavPath[0] = L'\0';
+							// WAVs are next to NativeTrainer.asi in release/bin; try local relative names first
+							if (ENTITY::IS_ENTITY_A_PED(target) && !ENTITY::IS_ENTITY_DEAD(target))
+								wcsncpy_s(wavPath, L"tped.wav", _TRUNCATE);
+							else if (ENTITY::IS_ENTITY_A_VEHICLE(target) && !ENTITY::IS_ENTITY_DEAD(target))
+								wcsncpy_s(wavPath, L"tvehicle.wav", _TRUNCATE);
+							else {
+								// type 3 == object/prop; filter roughly by can-be-damaged
+								int t = ENTITY::GET_ENTITY_TYPE(target);
+								if (t == 3) wcsncpy_s(wavPath, L"tprop.wav", _TRUNCATE);
+							}
+							if (wavPath[0]) PlayWavAsync(wavPath);
+							g_lastAimSoundMs = now; g_lastAimSoundEntity = target;
+						}
+					}
+
 					// Distance and health
 					Vector3 me = ENTITY::GET_ENTITY_COORDS(PLAYER::PLAYER_PED_ID(), TRUE, FALSE);
 					Vector3 tc = ENTITY::GET_ENTITY_COORDS(target, TRUE, FALSE);
@@ -2550,7 +2930,7 @@ void main()
 							// Update money source attribution
 							lastTargetPedForMoney = target; lastTargetPedForMoneyMs = GetTickCount();
 							wchar_t nbuf[128]; nbuf[0] = L'\0';
-							if (!name.empty()) { size_t n = name.size(); if (n > 127) n = 127; mbstowcs(nbuf, name.c_str(), n); nbuf[n] = L'\0'; }
+							if (!name.empty()) { size_t n = name.size(); if (n > 127) n = 127; size_t cv = 0; mbstowcs_s(&cv, nbuf, 128, name.c_str(), n); nbuf[n] = L'\0'; }
 							wcsncpy_s(lastTargetPedForMoneyName, nbuf, _TRUNCATE);
 						}
 						else if (ENTITY::IS_ENTITY_A_VEHICLE(target))
@@ -2591,7 +2971,7 @@ void main()
 						}
 						wchar_t wbuf[200];
 						wchar_t wname[128]; wname[0] = L'\0';
-						if (!name.empty()) { size_t n = name.size(); if (n > 127) n = 127; mbstowcs(wname, name.c_str(), n); wname[n] = L'\0'; swprintf_s(wbuf, L"aiming at %s, distance %d meters, health %d (%d%%)", wname, distM, hp, hpPct); }
+						if (!name.empty()) { size_t n = name.size(); if (n > 127) n = 127; size_t cv = 0; mbstowcs_s(&cv, wname, 128, name.c_str(), n); wname[n] = L'\0'; swprintf_s(wbuf, L"aiming at %s, distance %d meters, health %d (%d%%)", wname, distM, hp, hpPct); }
 						else { swprintf_s(wbuf, L"aiming at target, distance %d meters, health %d (%d%%)", distM, hp, hpPct); }
 						if (GetTickCount() - lastAimSpeakMs > 200) { A11y::speak(wbuf, true); lastAimSpeakMs = GetTickCount(); }
 						lastAimedEntity = target;
@@ -2604,6 +2984,8 @@ void main()
 					lastAimedEntity = 0; lastAimedDistM = -1; lastAimedHealthPct = -1;
 				}
 			}
+
+			// (camera pitch beep removed)
 		}
 		menuController->Update();
 		WAIT(0);

@@ -46,7 +46,7 @@ echo WARNING: Tolk source not found. Skipping Tolk build. Speech will work only 
 goto :tolk_after
 
 :tolk_build
-echo === Building Tolk.dll (Release x64) ===
+echo === Building Tolk.dll ^(Release x64^) ===
 rem Use a distinct loop var and proper modifier (%%~dpA)
 for %%A in ("%TOLK_PROJ%") do set "_tolk_dir=%%~dpA"
 pushd "%_tolk_dir%" 1>nul 2>nul
@@ -86,7 +86,7 @@ if not defined TOLK_OUT (
   )
 )
 
-echo === Building NativeTrainer (Release x64) ===
+echo === Building NativeTrainer ^(Release x64^) ===
 pushd "%~dp0samples\NativeTrainer"
 REM Don't force PlatformToolset here to avoid toolset mismatches
 set "_LOG_NT=%TEMP%\msbuild_nt_!RANDOM!.log"
@@ -110,11 +110,12 @@ echo === Copy tolk.dll next to NativeTrainer.asi ===
 copy /Y "%TOLK_OUT%" "%~dp0samples\NativeTrainer\bin\Release\tolk.dll" >nul || echo WARNING: Failed to copy tolk.dll
 :after_copy_tolk_to_bin
 
-echo === Create package folder for easy copying to RDR2 directory ===
+echo === Create/prepare package folder for easy copying to RDR2 directory ===
 set "PACK_DIR=%~dp0package_RDR2_A11y"
-if exist "%PACK_DIR%" rmdir /S /Q "%PACK_DIR%"
-mkdir "%PACK_DIR%"
-if errorlevel 1 goto :err
+if not exist "%PACK_DIR%" (
+  mkdir "%PACK_DIR%"
+  if errorlevel 1 goto :err
+)
 
 copy /Y "%NT_OUT%" "%PACK_DIR%\NativeTrainer.asi" >nul
 if errorlevel 1 goto :err
@@ -126,11 +127,33 @@ copy /Y "%TOLK_OUT%" "%PACK_DIR%\tolk.dll" >nul
 if errorlevel 1 echo WARNING: Failed to copy tolk.dll to package
 :after_copy_tolk_to_pkg
 
-rem Create a short README with copy instructions (avoid paren blocks)
->"%PACK_DIR%\README.txt" echo Copy both files to your Red Dead Redemption 2 game directory (where RDR2.exe is):
->>"%PACK_DIR%\README.txt" echo - NativeTrainer.asi
->>"%PACK_DIR%\README.txt" echo - tolk.dll (optional, needed for NVDA/JAWS speech via Tolk)
->>"%PACK_DIR%\README.txt" echo Ensure ScriptHookRDR2 is installed. NVDA should be running for speech.
+rem Populate README: prefer repository template if present; otherwise keep existing or create a short stub
+if exist "%~dp0README_package.txt" (
+  echo Using README template from "%~dp0README_package.txt" to "%PACK_DIR%\README.txt"
+  copy /Y "%~dp0README_package.txt" "%PACK_DIR%\README.txt"
+) else (
+  if not exist "%PACK_DIR%\README.txt" (
+    echo Creating minimal README stub in package ^(template not found^)
+    echo Copy both files to your Red Dead Redemption 2 game directory ^(where RDR2.exe is^):>"%PACK_DIR%\README.txt"
+    echo - NativeTrainer.asi>>"%PACK_DIR%\README.txt"
+    echo - tolk.dll ^(optional, needed for NVDA/JAWS speech via Tolk^)>>"%PACK_DIR%\README.txt"
+    echo Ensure ScriptHookRDR2 is installed. NVDA should be running for speech.>>"%PACK_DIR%\README.txt"
+  ) else (
+    echo NOTE: Keeping existing README.txt in package.
+  )
+)
+
+REM Ensure audio cue wavs are present in package (keep existing ones)
+for %%W in (tped.wav tvehicle.wav tprop.wav) do (
+  if not exist "%PACK_DIR%\%%W" (
+    if exist "%~dp0samples\NativeTrainer\bin\Release\%%W" copy /Y "%~dp0samples\NativeTrainer\bin\Release\%%W" "%PACK_DIR%\%%W" >nul
+  )
+)
+
+REM Also copy wavs next to built NativeTrainer.asi for local testing
+for %%W in (tped.wav tvehicle.wav tprop.wav) do (
+  if exist "%PACK_DIR%\%%W" copy /Y "%PACK_DIR%\%%W" "%~dp0samples\NativeTrainer\bin\Release\%%W" >nul
+)
 
 echo SUCCESS. Output:
 echo   %NT_OUT%

@@ -8,15 +8,14 @@ static VOID (WINAPI *pTolk_Unload)() = NULL;
 static BOOL (WINAPI *pTolk_Output)(LPCWSTR, BOOL) = NULL;
 static HMODULE hTolk = NULL;
 static BOOL g_loadedOK = FALSE;
-static bool g_enabled = true;
 
+// Avoid SEH in Release builds (C2712). We assume Tolk.dll behaves and simply
+// call through when function pointers are valid.
 static __declspec(noinline) BOOL call_load() {
-    __try { return pTolk_Load ? pTolk_Load() : FALSE; }
-    __except(EXCEPTION_EXECUTE_HANDLER) { return FALSE; }
+    return pTolk_Load ? pTolk_Load() : FALSE;
 }
 static __declspec(noinline) BOOL call_output(LPCWSTR txt, BOOL intr) {
-    __try { return pTolk_Output ? pTolk_Output(txt, intr) : FALSE; }
-    __except(EXCEPTION_EXECUTE_HANDLER) { return FALSE; }
+    return pTolk_Output ? pTolk_Output(txt, intr) : FALSE;
 }
 
 TolkApi& api();
@@ -24,7 +23,7 @@ bool& enabledFlag();
 void setEnabled(bool on);
 
 void init() {
-    if (!g_enabled || hTolk) return;
+    if (!enabledFlag() || hTolk) return;
     wchar_t path[MAX_PATH]; path[0] = L'\0';
     HMODULE hMod = GetModuleHandleW(NULL);
     if (GetModuleFileNameW(hMod, path, MAX_PATH)) {
@@ -48,14 +47,14 @@ void init() {
 
 void shutdown() {
     if (pTolk_Unload) {
-        __try { pTolk_Unload(); } __except(EXCEPTION_EXECUTE_HANDLER) {}
+        pTolk_Unload();
     }
     if (hTolk) FreeLibrary(hTolk);
     hTolk = NULL; pTolk_Load = NULL; pTolk_Unload = NULL; pTolk_Output = NULL; g_loadedOK = FALSE;
 }
 
 void speak(const std::wstring &text, bool interrupt) {
-    if (!g_enabled) return;
+    if (!enabledFlag()) return;
     if (!hTolk || !g_loadedOK) init();
     if (!(hTolk && pTolk_Output && g_loadedOK) || text.empty()) return;
     if (!call_output(text.c_str(), interrupt ? TRUE : FALSE)) setEnabled(false);
