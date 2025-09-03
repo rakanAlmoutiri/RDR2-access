@@ -8,18 +8,24 @@
 #include "scriptmenu.h"
 #include "keyboard.h"
 #include "a11y.h"
+#include "debuglog.h"
 
 #include <unordered_map>
 #include <vector>
 #include <string>
+#include <algorithm>
 #include <ctime>
 #include <cmath>
 // GTA11Y-like aiming cues additions
 #include <thread>
 #include <mmsystem.h>
 #pragma comment(lib, "winmm.lib")
+#include <windows.h>
 
 using namespace std;
+
+// Forward declaration for safe zone label resolver
+static bool TryGetZoneLabelAt(const Vector3& pos, std::wstring& outW);
 
 #include "scriptinfo.h"
 
@@ -63,6 +69,190 @@ static inline const wchar_t* ModeName(A11yMode m) {
 	}
 }
 
+// --- Minimal Guard/Squad data structures (placed early for visibility) ---
+// Track each guard plus their assigned horse (if any)
+struct GuardInfo { Ped ped{0}; Ped horse{0}; bool mounted{false}; };
+struct Squad { std::vector<GuardInfo> guards; };
+static std::vector<Squad> g_squads;         // all squads
+static int g_activeSquad = -1;              // current selected squad
+static int g_maxSquads = 4;                 // small default cap
+static int g_defaultSquadSize = 3;          // for announcements only for now
+// Global guard options
+static bool g_guardsInfiniteAmmo = true;    // default ON per user preference
+static bool g_guardsNoReload = true;        // default ON per user preference
+// Riot mode
+static bool g_riotEnabled = false;          // global riot toggle
+static DWORD g_lastRiotTickMs = 0;
+
+// Squad behavior state and patrol settings
+enum class SquadOrder { Patrol = 0, Follow = 1, Hold = 2, GuardHere = 3 };
+static SquadOrder g_activeSquadOrder = SquadOrder::Patrol;
+static bool g_squadPatrolAroundMe = true;
+static DWORD g_lastPatrolTickMs = 0;
+static Vector3 g_guardHerePos{}; // cached guard-here anchor
+// Auto-defense cadence for squads
+static DWORD g_lastGuardDefenseTickMs = 0;
+// Squad formation and maintenance
+enum class GuardFormation { Column = 0, Line = 1, Wedge = 2 };
+static GuardFormation g_activeFormation = GuardFormation::Column;
+static DWORD g_lastFormationTickMs = 0;
+static DWORD g_lastMountEnforceTickMs = 0;
+static DWORD g_lastCrowdControlTickMs = 0;
+
+// Auto-Defense System (Silent Protection)
+static bool g_autoDefenseEnabled = false;   // main toggle for auto-defense
+static float g_autoDefenseRadius = 30.0f;   // 30 meter detection radius
+static DWORD g_lastAutoDefenseScanMs = 0;   // scan throttle (every 500ms)
+static int g_autoDefenseScanInterval = 500; // milliseconds between scans
+
+// Helpers to identify our guards/horses fast
+static inline bool IsOurGuard(Ped p) {
+	if (!p) return false;
+	for (auto &sq : g_squads) for (auto &gi : sq.guards) if (gi.ped == p) return true;
+	return false;
+}
+static inline bool IsOurHorse(Ped p) {
+	if (!p) return false;
+	for (auto &sq : g_squads) for (auto &gi : sq.guards) if (gi.horse == p) return true;
+	return false;
+}
+
+// Compute formation offsets relative to the player for the i-th guard (0-based)
+static inline void GetFormationOffset(int idx, GuardFormation form, bool mounted, float &outX, float &outY) {
+	// Keep generous spacing to avoid crowding the player; further when mounted
+	const float stepBack = mounted ? 4.0f : 2.8f;    // distance backwards between rows
+	const float lateral = mounted ? 2.6f : 1.8f;     // side-to-side spacing
+	switch (form) {
+		case GuardFormation::Column: {
+			outX = 0.0f; outY = - (2.0f + stepBack * (idx + 1));
+			break;
+		}
+		case GuardFormation::Line: {
+			// Centered line behind the player
+			int side = (idx % 2 == 0) ? -1 : 1; int rank = (idx / 2);
+			outX = side * (lateral * (rank + 1));
+			outY = - (3.5f + (mounted ? 2.0f : 1.2f));
+			break;
+		}
+		case GuardFormation::Wedge: default: {
+			// Triangle/wedge behind the player apex
+			int row = 0; int count = 0;
+			// rows of 1, 2, 3, ...
+			while (count + (row + 1) <= idx) { count += (row + 1); ++row; }
+			int posInRow = idx - count; // 0..row
+			float baseBack = 3.5f + row * stepBack;
+			// center the row left/right
+			float startX = - (row * 0.5f) * lateral;
+			outX = startX + posInRow * lateral;
+			outY = - baseBack;
+			break;
+		}
+	}
+}
+
+// Issue a follow task for guard or horse based on mounted state
+static inline void CommandGuardFollowOffset(const GuardInfo &gi, Ped player, float offX, float offY) {
+	if (!gi.ped || !ENTITY::DOES_ENTITY_EXIST(gi.ped)) return;
+	bool isMounted = PED::IS_PED_ON_MOUNT(gi.ped) ? true : false;
+	if (isMounted && gi.horse && ENTITY::DOES_ENTITY_EXIST(gi.horse)) {
+		// Drive the horse; rider will go along. Slower and wider to keep room.
+		AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(gi.horse, player, offX, offY, 0.0f, 2.6f, -1, 1.8f, TRUE, FALSE, FALSE, FALSE, FALSE);
+	} else {
+		AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(gi.ped, player, offX, offY, 0.0f, 2.6f, -1, 1.6f, TRUE, FALSE, FALSE, FALSE, FALSE);
+	}
+}
+
+// Spawn a durable friendly guard near player with a strong weapon
+static Ped SpawnGuardNearPlayer(Hash modelHash, Hash weaponHash, float offX, float offY)
+{
+	Ped me = PLAYER::PLAYER_PED_ID(); if (!ENTITY::DOES_ENTITY_EXIST(me)) return 0;
+	if (!STREAMING::IS_MODEL_IN_CDIMAGE(modelHash) || !STREAMING::IS_MODEL_VALID(modelHash)) return 0;
+	STREAMING::REQUEST_MODEL(modelHash, FALSE);
+	int waits = 0; while (!STREAMING::HAS_MODEL_LOADED(modelHash) && waits < 200) { WAIT(0); ++waits; }
+	// Add small randomization to the spawn offset; occasionally spawn farther so they run to you
+	float jitterX = ((GAMEPLAY::GET_RANDOM_INT_IN_RANGE(-100, 101)) / 100.0f) * 0.7f; // ~ +/-0.7m
+	float jitterY = ((GAMEPLAY::GET_RANDOM_INT_IN_RANGE(-100, 101)) / 100.0f) * 0.7f;
+	bool farSpawn = (GAMEPLAY::GET_RANDOM_INT_IN_RANGE(0, 100) < 30); // 30% chance far
+	float baseX = offX + jitterX;
+	float baseY = offY + jitterY;
+	if (farSpawn) { baseX += (GAMEPLAY::GET_RANDOM_INT_IN_RANGE(-20, 21)) * 0.5f; baseY += (GAMEPLAY::GET_RANDOM_INT_IN_RANGE(-20, 21)) * 0.5f; }
+	Vector3 pos = ENTITY::GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS(me, baseX, baseY, 0.0f);
+	Ped p = PED::CREATE_PED(modelHash, pos.x, pos.y, pos.z, ENTITY::GET_ENTITY_HEADING(me), 0, 0, 0, 0);
+	STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(modelHash);
+	if (!p || !ENTITY::DOES_ENTITY_EXIST(p)) return 0;
+	PED::SET_PED_VISIBLE(p, TRUE);
+	// Friendly relationships
+	Hash myGroup = PED::GET_PED_RELATIONSHIP_GROUP_DEFAULT_HASH(me);
+	PED::SET_PED_RELATIONSHIP_GROUP_HASH(p, myGroup);
+	int grp = PLAYER::GET_PLAYER_GROUP(PLAYER::PLAYER_ID());
+	if (grp) PED::SET_PED_AS_GROUP_MEMBER(p, grp);
+	// Make durable and capable
+	ENTITY::SET_ENTITY_INVINCIBLE(p, TRUE);
+	PED::SET_PED_ACCURACY(p, 70);
+	PED::SET_PED_COMBAT_ABILITY(p, 2);
+	PED::SET_PED_COMBAT_MOVEMENT(p, 2);
+	// Arm guard with a strong weapon (use stable path like old bodyguard logic)
+	WEAPON::GIVE_DELAYED_WEAPON_TO_PED(p, weaponHash, 120, 1, 0x2cd419dc);
+	WEAPON::SET_CURRENT_PED_WEAPON(p, weaponHash, 1, 0, 0, 0);
+	// Initial behavior: if spawned far, make them run to you and then patrol/follow
+	AI::TASK_CLEAR_LOOK_AT(p);
+	if (farSpawn) {
+		AI::TASK_GO_TO_ENTITY(p, me, -1, 2.5f, 3.5f, 0, 0);
+	} else {
+		AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(p, me, offX, offY, 0.0f, 2.4f, -1, 1.5f, TRUE, FALSE, FALSE, FALSE, FALSE);
+	}
+	return p;
+}
+
+static void ReleaseGuard(Ped p)
+{
+	if (!p || !ENTITY::DOES_ENTITY_EXIST(p)) return;
+	PED::REMOVE_PED_FROM_GROUP(p);
+	AI::CLEAR_PED_TASKS_IMMEDIATELY(p, TRUE, TRUE);
+	Vector3 here = ENTITY::GET_ENTITY_COORDS(p, TRUE, FALSE);
+	AI::TASK_WANDER_IN_AREA(p, here.x, here.y, here.z, 20.0f, 3.0f, 5.0f, TRUE);
+	ENTITY::SET_ENTITY_INVINCIBLE(p, FALSE);
+	ENTITY::SET_PED_AS_NO_LONGER_NEEDED(&p);
+}
+
+// Spawn an Arabian horse near a given ped and return the horse ped
+static Ped SpawnArabianHorseNearPed(Ped nearPed, int variantIndex)
+{
+	if (!nearPed || !ENTITY::DOES_ENTITY_EXIST(nearPed)) return 0;
+	static const char* kArabians[3] = {
+		"A_C_HORSE_ARABIAN_BLACK",
+		"A_C_HORSE_ARABIAN_ROSEGREYBAY",
+		"A_C_HORSE_ARABIAN_WHITE"
+	};
+	if (variantIndex < 0) variantIndex = 0; variantIndex %= 3;
+	Hash modelHash = GAMEPLAY::GET_HASH_KEY((char*)kArabians[variantIndex]);
+	if (!STREAMING::IS_MODEL_IN_CDIMAGE(modelHash) || !STREAMING::IS_MODEL_VALID(modelHash)) return 0;
+	STREAMING::REQUEST_MODEL(modelHash, FALSE);
+	int waits = 0; while (!STREAMING::HAS_MODEL_LOADED(modelHash) && waits < 200) { WAIT(0); ++waits; }
+	Vector3 pos = ENTITY::GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS(nearPed, 2.0f, -1.5f, 0.0f);
+	float heading = ENTITY::GET_ENTITY_HEADING(nearPed);
+	Ped horse = PED::CREATE_PED(modelHash, pos.x, pos.y, pos.z, heading, 0, 0, 0, 0);
+	STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(modelHash);
+	if (!horse || !ENTITY::DOES_ENTITY_EXIST(horse)) return 0;
+	// Make visible, healthy, and calm
+	PED::SET_PED_VISIBLE(horse, TRUE);
+	int maxH = PED::GET_PED_MAX_HEALTH(horse); if (maxH <= 0) maxH = 200;
+	ENTITY::SET_ENTITY_HEALTH(horse, maxH, FALSE);
+	PED::SET_PED_STAMINA(horse, 100.0f);
+	// Keep near its owner by following closely until mounted
+	AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(horse, nearPed, -1.5f, -1.0f, 0.0f, 2.2f, -1, 1.5f, TRUE, FALSE, FALSE, FALSE, FALSE);
+	return horse;
+}
+
+static void ReleaseHorse(Ped horse)
+{
+	if (!horse || !ENTITY::DOES_ENTITY_EXIST(horse)) return;
+	AI::CLEAR_PED_TASKS_IMMEDIATELY(horse, TRUE, TRUE);
+	Vector3 here = ENTITY::GET_ENTITY_COORDS(horse, TRUE, FALSE);
+	AI::TASK_WANDER_IN_AREA(horse, here.x, here.y, here.z, 30.0f, 3.0f, 5.0f, TRUE);
+	ENTITY::SET_PED_AS_NO_LONGER_NEEDED(&horse);
+}
+
 static inline int HeadingBucket(float h) {
 	// Normalize 0..360, map to 8 buckets (N, NE, E, SE, S, SW, W, NW)
 	while (h < 0) h += 360.0f; while (h >= 360.0f) h -= 360.0f;
@@ -89,6 +279,80 @@ static inline void BeepAsync(int freq, int durMs)
 		// Beep is blocking; run in a short-lived detached thread
 		Beep(freq, durMs);
 	}).detach();
+}
+
+// Auto-Defense System: Scan for hostile entities within radius and eliminate them
+static void ScanAndEliminateHostiles()
+{
+	if (!g_autoDefenseEnabled) return;
+	
+	DWORD now = GetTickCount();
+	if ((now - g_lastAutoDefenseScanMs) < g_autoDefenseScanInterval) return;
+	g_lastAutoDefenseScanMs = now;
+	
+	Ped playerPed = PLAYER::PLAYER_PED_ID();
+	if (!playerPed || !ENTITY::DOES_ENTITY_EXIST(playerPed) || ENTITY::IS_ENTITY_DEAD(playerPed)) return;
+	
+	Vector3 playerPos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
+	Ped playerHorse = 0;
+	if (PED::IS_PED_ON_MOUNT(playerPed)) {
+		playerHorse = PED::GET_MOUNT(playerPed);
+	}
+	
+	// Get nearby peds
+	int packed[33] = { 32 };
+	int count = PED::GET_PED_NEARBY_PEDS(playerPed, packed, -1, 0);
+	if (count <= 0) return;
+	
+	int lim = packed[0]; if (lim > 32) lim = 32;
+	for (int i = 1; i <= lim; ++i)
+	{
+		Ped target = (Ped)packed[i];
+		if (!target || target == playerPed) continue;
+		if (!ENTITY::DOES_ENTITY_EXIST(target) || ENTITY::IS_ENTITY_DEAD(target)) continue;
+		if (PED::IS_PED_A_PLAYER(target)) continue; // never attack players
+		
+		// Skip if it's the player's horse
+		if (playerHorse && target == playerHorse) continue;
+		
+		// Skip if it's one of our guards
+		bool isOurGuard = false;
+		for (const auto& squad : g_squads) {
+			for (const auto& guard : squad.guards) {
+				if (guard.ped == target || guard.horse == target) {
+					isOurGuard = true;
+					break;
+				}
+			}
+			if (isOurGuard) break;
+		}
+		if (isOurGuard) continue;
+		
+		// Check distance
+		Vector3 targetPos = ENTITY::GET_ENTITY_COORDS(target, TRUE, FALSE);
+		float distance = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(playerPos.x, playerPos.y, playerPos.z, 
+														       targetPos.x, targetPos.y, targetPos.z, TRUE);
+		if (distance > g_autoDefenseRadius) continue;
+		
+		// Check if hostile (attacking player, or in combat, or hostile relationship)
+		bool isHostile = false;
+		if (PED::IS_PED_IN_COMBAT(target, playerPed) || 
+			PED::GET_PED_RELATIONSHIP_GROUP_HASH(target) != PED::GET_PED_RELATIONSHIP_GROUP_HASH(playerPed)) {
+			isHostile = true;
+		}
+		
+		// Also check for predatory animals
+		Hash model = ENTITY::GET_ENTITY_MODEL(target);
+		if (PED::IS_PED_HUMAN(target) == false) { // it's an animal
+			// Assume hostile if it's a predator (simplified check)
+			isHostile = true;
+		}
+		
+		if (isHostile) {
+			// Eliminate silently
+			ENTITY::SET_ENTITY_HEALTH(target, 0, 0);
+		}
+	}
 }
 
 // Best-effort wallet reader: prefer CASH natives, then fall back to PED::GET_PED_MONEY
@@ -968,6 +1232,43 @@ public:
 		: MenuItemSwitchable(caption) {}
 };
 
+// Riot mode toggle: make nearby peds fight each other until disabled
+class MenuItemRiotMode : public MenuItemSwitchable
+{
+	virtual void OnSelect()
+	{
+		bool ns = !GetState();
+		SetState(ns);
+		g_riotEnabled = ns;
+		if (ns) A11y::speak(L"riot on", true); else A11y::speak(L"riot off", true);
+		if (!ns)
+		{
+			// Try to calm down nearby peds
+			Ped me = PLAYER::PLAYER_PED_ID();
+			if (ENTITY::DOES_ENTITY_EXIST(me))
+			{
+				int packed[33] = { 32 };
+				int count = PED::GET_PED_NEARBY_PEDS(me, packed, -1, 0);
+				if (count > 0)
+				{
+					int lim = packed[0]; if (lim > 32) lim = 32;
+					for (int i = 1; i <= lim; ++i)
+					{
+						Ped p = (Ped)packed[i];
+						if (!p || p == me) continue;
+						if (!ENTITY::DOES_ENTITY_EXIST(p) || ENTITY::IS_ENTITY_DEAD(p) || PED::IS_PED_A_PLAYER(p)) continue;
+						AI::CLEAR_PED_TASKS(p, TRUE, TRUE);
+						Vector3 pc = ENTITY::GET_ENTITY_COORDS(p, TRUE, FALSE);
+						AI::TASK_WANDER_IN_AREA(p, pc.x, pc.y, pc.z, 60.0f, 3.0f, 6.0f, TRUE);
+					}
+				}
+			}
+		}
+	}
+public:
+	MenuItemRiotMode(string caption) : MenuItemSwitchable(caption) { SetState(g_riotEnabled); }
+};
+
 class MenuItemMiscAddHonor : public MenuItemDefault
 {
 	virtual void OnSelect()
@@ -1539,12 +1840,284 @@ MenuBase *CreateMiscMenu(MenuController *controller)
 	menu->AddItem(new MenuItemMiscRevealMap("REVEAL MAP"));
 	menu->AddItem(new MenuItemMiscAddHonor("ADD HONOR"));
 	menu->AddItem(new MenuItemMiscHideHud("HIDE HUD"));
+	menu->AddItem(new MenuItemRiotMode("RIOT MODE"));
 
 	menu->AddItem(new MenuItemMiscTransportGuns("HORSE TURRETS", true, true));
 	menu->AddItem(new MenuItemMiscTransportGuns("HORSE CANNONS", true, false));
 	menu->AddItem(new MenuItemMiscTransportGuns("VEHICLE TURRETS", false, true));
 	menu->AddItem(new MenuItemMiscTransportGuns("VEHICLE CANNONS", false, false));
 
+	return menu;
+}
+
+// --- Guard Manager (skeleton, placeholders) ---
+class MenuItemSpeakOnSelect : public MenuItemDefault {
+	std::wstring m_msg;
+	virtual void OnSelect() {
+		if (!m_msg.empty()) A11y::speak(m_msg, true);
+	}
+public:
+	MenuItemSpeakOnSelect(std::string caption, const std::wstring& msg)
+		: MenuItemDefault(caption), m_msg(msg) {}
+};
+
+static MenuBase* CreateGuardSquadsMenu(MenuController* controller)
+{
+	auto menu = new MenuBase(new MenuItemListTitle("SQUADS"));
+	controller->RegisterMenu(menu);
+	// Create squad: add empty squad and select it
+	class MenuItemCreateSquad : public MenuItemDefault { public: MenuItemCreateSquad():MenuItemDefault("Create squad"){}; void OnSelect() override {
+		if ((int)g_squads.size() >= g_maxSquads) { A11y::speak(L"max squads", true); return; }
+		g_squads.push_back(Squad{}); g_activeSquad = (int)g_squads.size()-1; wchar_t buf[64]; swprintf_s(buf, L"squad %d created", g_activeSquad+1); A11y::speak(buf, true);
+	}}; menu->AddItem(new MenuItemCreateSquad());
+	// Dismiss squad: remove current squad
+	class MenuItemDismissSquad : public MenuItemDefault { public: MenuItemDismissSquad():MenuItemDefault("Dismiss squad"){}; void OnSelect() override {
+		if (g_activeSquad < 0 || g_activeSquad >= (int)g_squads.size()) { A11y::speak(L"no squad", true); return; }
+		int idx = g_activeSquad;
+		// release spawned guards and their horses if any
+		for (auto &gi : g_squads[idx].guards) { if (gi.horse) ReleaseHorse(gi.horse); ReleaseGuard(gi.ped); }
+		g_squads.erase(g_squads.begin()+idx);
+		if (g_squads.empty()) g_activeSquad = -1; else if (idx >= (int)g_squads.size()) g_activeSquad = (int)g_squads.size()-1; else g_activeSquad = idx;
+		A11y::speak(L"squad dismissed", true);
+	}}; menu->AddItem(new MenuItemDismissSquad());
+	// Squad size: speak current size
+	class MenuItemSquadSize : public MenuItemDefault { public: MenuItemSquadSize():MenuItemDefault("Squad size"){}; void OnSelect() override {
+		int sz = 0; if (g_activeSquad >= 0 && g_activeSquad < (int)g_squads.size()) sz = (int)g_squads[g_activeSquad].guards.size();
+		wchar_t buf[64]; swprintf_s(buf, L"squad size %d", sz); A11y::speak(buf, true);
+	}}; menu->AddItem(new MenuItemSquadSize());
+	return menu;
+}
+
+static MenuBase* CreateGuardRosterMenu(MenuController* controller)
+{
+	auto menu = new MenuBase(new MenuItemListTitle("GUARDS"));
+	controller->RegisterMenu(menu);
+	// Select next squad
+	class MenuItemSelectSquad : public MenuItemDefault { public: MenuItemSelectSquad():MenuItemDefault("Select next squad"){}; void OnSelect() override {
+		if (g_squads.empty()) { A11y::speak(L"no squads", true); return; }
+		if (g_activeSquad < 0) g_activeSquad = 0; else g_activeSquad = (g_activeSquad + 1) % (int)g_squads.size();
+		wchar_t buf[64]; swprintf_s(buf, L"squad %d", g_activeSquad+1); A11y::speak(buf, true);
+	}}; menu->AddItem(new MenuItemSelectSquad());
+	// Add guard: spawn and attach to active squad
+	class MenuItemAddGuard : public MenuItemDefault { public: MenuItemAddGuard():MenuItemDefault("Add guard"){}; void OnSelect() override {
+		if (g_activeSquad < 0 || g_activeSquad >= (int)g_squads.size()) { A11y::speak(L"no squad", true); return; }
+		Hash model = GAMEPLAY::GET_HASH_KEY("S_M_M_CORNWALLGUARD_01");
+		Hash weapon = GAMEPLAY::GET_HASH_KEY("WEAPON_REPEATER_CARBINE");
+		float offs[][2] = { { -0.6f, -1.6f }, { 0.6f, -1.8f }, { -1.2f, -2.0f }, { 1.2f, -2.2f }, { 0.0f, -2.4f } };
+		int slot = (int)g_squads[g_activeSquad].guards.size(); if (slot < 0) slot = 0; if (slot > 4) slot = 4;
+		Ped p = SpawnGuardNearPlayer(model, weapon, offs[slot][0], offs[slot][1]);
+		if (!p) { A11y::speak(L"spawn failed", true); return; }
+		GuardInfo gi; gi.ped = p; gi.horse = 0; gi.mounted = false;
+		// Auto-spawn an Arabian horse for this guard and have it follow the owner until mounted
+		Ped h = SpawnArabianHorseNearPed(p, slot % 3);
+		if (h) {
+			gi.horse = h;
+			// Encourage immediate mount: stop horse briefly and bring rider close
+			Vector3 hpos = ENTITY::GET_ENTITY_COORDS(h, TRUE, FALSE);
+			AI::TASK_STAND_STILL(h, 2500);
+			AI::TASK_GO_TO_COORD_ANY_MEANS(p, hpos.x, hpos.y, hpos.z, 2.6f, 0, FALSE, 0, 0.0f);
+		}
+		g_squads[g_activeSquad].guards.push_back(gi);
+		// Default squad order to Patrol when first guards exist
+		g_activeSquadOrder = SquadOrder::Patrol;
+		wchar_t buf[64]; swprintf_s(buf, L"guard %d", (int)g_squads[g_activeSquad].guards.size()); A11y::speak(buf, true);
+	}}; menu->AddItem(new MenuItemAddGuard());
+	// Remove guard: pop last and release
+	class MenuItemRemoveGuard : public MenuItemDefault { public: MenuItemRemoveGuard():MenuItemDefault("Remove guard"){}; void OnSelect() override {
+		if (g_activeSquad < 0 || g_activeSquad >= (int)g_squads.size()) { A11y::speak(L"no squad", true); return; }
+		auto &sq = g_squads[g_activeSquad]; if (sq.guards.empty()) { A11y::speak(L"no guards", true); return; }
+		GuardInfo gi = sq.guards.back(); if (gi.horse) ReleaseHorse(gi.horse); ReleaseGuard(gi.ped); sq.guards.pop_back(); A11y::speak(L"guard removed", true);
+	}}; menu->AddItem(new MenuItemRemoveGuard());
+	// Status: speak which squad is active
+	class MenuItemRosterStatus : public MenuItemDefault { public: MenuItemRosterStatus():MenuItemDefault("Active squad status"){}; void OnSelect() override {
+		if (g_activeSquad < 0 || g_activeSquad >= (int)g_squads.size()) { A11y::speak(L"no squad", true); return; }
+		int sz = (int)g_squads[g_activeSquad].guards.size(); wchar_t buf[64]; swprintf_s(buf, L"squad %d, %d guards", g_activeSquad+1, sz); A11y::speak(buf, true);
+	}}; menu->AddItem(new MenuItemRosterStatus());
+	return menu;
+}
+
+static MenuBase* CreateGuardWeaponsMenu(MenuController* controller)
+{
+	auto menu = new MenuBase(new MenuItemListTitle("WEAPONS"));
+	controller->RegisterMenu(menu);
+
+	// Helper to arm a guard respecting global toggles
+	auto ArmGuardWith = [](Ped p, Hash weaponHash) {
+		if (!p || !ENTITY::DOES_ENTITY_EXIST(p)) return;
+		WEAPON::GIVE_DELAYED_WEAPON_TO_PED(p, weaponHash, 120, 1, 0x2cd419dc);
+		WEAPON::SET_CURRENT_PED_WEAPON(p, weaponHash, 1, 0, 0, 0);
+		if (g_guardsInfiniteAmmo) {
+			WEAPON::SET_PED_INFINITE_AMMO(p, TRUE, 0);
+		}
+		// No per-clip adjustments for now (stability)
+	};
+
+	class MenuItemEquipPreset : public MenuItemDefault {
+		Hash m_weapon;
+		std::wstring m_announce;
+		decltype(ArmGuardWith) m_armFn;
+	public:
+		MenuItemEquipPreset(std::string caption, Hash weapon, const std::wstring &announce, decltype(ArmGuardWith) armFn)
+			: MenuItemDefault(caption), m_weapon(weapon), m_announce(announce), m_armFn(armFn) {}
+		void OnSelect() override {
+			if (g_activeSquad < 0 || g_activeSquad >= (int)g_squads.size()) { A11y::speak(L"no squad", true); return; }
+			int applied = 0;
+			auto &sq = g_squads[g_activeSquad];
+			for (auto &gi : sq.guards) {
+				Ped p = gi.ped; if (!p || !ENTITY::DOES_ENTITY_EXIST(p)) continue;
+				m_armFn(p, m_weapon); applied++;
+			}
+			if (!m_announce.empty()) A11y::speak(m_announce, true);
+			wchar_t buf[64]; swprintf_s(buf, L"equipped %d guards", applied); A11y::speak(buf, false);
+		}
+	};
+
+	// Weapon presets (strong defaults)
+	Hash wRepeater   = GAMEPLAY::GET_HASH_KEY("WEAPON_REPEATER_CARBINE");
+	Hash wShotgun    = GAMEPLAY::GET_HASH_KEY("WEAPON_SHOTGUN_DOUBLEBARREL");
+	Hash wSniper     = GAMEPLAY::GET_HASH_KEY("WEAPON_SNIPERRIFLE_CARCANO");
+	Hash wMeleeKnife = GAMEPLAY::GET_HASH_KEY("WEAPON_MELEE_KNIFE");
+
+	menu->AddItem(new MenuItemEquipPreset("Preset: rifleman", wRepeater, L"riflemen", ArmGuardWith));
+	menu->AddItem(new MenuItemEquipPreset("Preset: shotgunner", wShotgun, L"shotgunners", ArmGuardWith));
+	menu->AddItem(new MenuItemEquipPreset("Preset: sniper", wSniper, L"snipers", ArmGuardWith));
+	menu->AddItem(new MenuItemEquipPreset("Preset: melee", wMeleeKnife, L"melee", ArmGuardWith));
+
+	// Global toggles for all guards
+	class MenuItemGuardsInfiniteAmmo : public MenuItemSwitchable {
+		virtual void OnSelect() override {
+			bool ns = !GetState(); SetState(ns); g_guardsInfiniteAmmo = ns;
+			// Apply immediately to existing guards
+			for (auto &sq : g_squads) for (auto &gi : sq.guards) {
+				Ped p = gi.ped; if (!p || !ENTITY::DOES_ENTITY_EXIST(p)) continue;
+				WEAPON::SET_PED_INFINITE_AMMO(p, ns ? TRUE : FALSE, 0);
+			}
+			A11y::speak(ns ? L"infinite ammo on" : L"infinite ammo off", true);
+		}
+	public:
+		MenuItemGuardsInfiniteAmmo(std::string caption) : MenuItemSwitchable(caption) { SetState(g_guardsInfiniteAmmo); }
+	};
+
+	class MenuItemGuardsNoReload : public MenuItemSwitchable {
+		virtual void OnSelect() override {
+			bool ns = !GetState(); SetState(ns); g_guardsNoReload = ns;
+			A11y::speak(ns ? L"no reload on" : L"no reload off", true);
+		}
+	public:
+		MenuItemGuardsNoReload(std::string caption) : MenuItemSwitchable(caption) { SetState(g_guardsNoReload); }
+	};
+
+	menu->AddItem(new MenuItemGuardsInfiniteAmmo("Infinite ammo (guards)"));
+	menu->AddItem(new MenuItemGuardsNoReload("No reload (guards)"));
+
+	// Keep placeholder for future custom per-guard loadouts
+	menu->AddItem(new MenuItemSpeakOnSelect("Custom loadout", L"custom loadout"));
+	return menu;
+}
+
+static MenuBase* CreateGuardMountsMenu(MenuController* controller)
+{
+	auto menu = new MenuBase(new MenuItemListTitle("MOUNTS"));
+	// Give Arabian horses to each guard in the active squad
+	class MenuItemGiveHorses : public MenuItemDefault { public: MenuItemGiveHorses():MenuItemDefault("Give horses"){}; void OnSelect() override {
+		if (g_activeSquad < 0 || g_activeSquad >= (int)g_squads.size()) { A11y::speak(L"no squad", true); return; }
+		auto &sq = g_squads[g_activeSquad]; if (sq.guards.empty()) { A11y::speak(L"no guards", true); return; }
+		int given = 0; int variant = 0;
+		for (auto &gi : sq.guards) {
+			if (!gi.ped || !ENTITY::DOES_ENTITY_EXIST(gi.ped)) continue;
+			if (gi.horse && ENTITY::DOES_ENTITY_EXIST(gi.horse)) { // refresh follow task
+				AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(gi.horse, gi.ped, -1.5f, -1.0f, 0.0f, 2.2f, -1, 1.5f, TRUE, FALSE, FALSE, FALSE, FALSE);
+				continue;
+			}
+			Ped h = SpawnArabianHorseNearPed(gi.ped, variant++);
+			if (h) { gi.horse = h; gi.mounted = false; ++given; }
+		}
+		wchar_t buf[64]; swprintf_s(buf, L"%d horses", given); A11y::speak(buf, true);
+	}}; menu->AddItem(new MenuItemGiveHorses());
+
+	// Remove horses from each guard (release them)
+	class MenuItemRemoveHorses : public MenuItemDefault { public: MenuItemRemoveHorses():MenuItemDefault("Remove horses"){}; void OnSelect() override {
+		if (g_activeSquad < 0 || g_activeSquad >= (int)g_squads.size()) { A11y::speak(L"no squad", true); return; }
+		auto &sq = g_squads[g_activeSquad]; if (sq.guards.empty()) { A11y::speak(L"no guards", true); return; }
+		int removed = 0;
+		for (auto &gi : sq.guards) { if (gi.horse) { ReleaseHorse(gi.horse); gi.horse = 0; gi.mounted = false; ++removed; } }
+		wchar_t buf[64]; swprintf_s(buf, L"%d removed", removed); A11y::speak(buf, true);
+	}}; menu->AddItem(new MenuItemRemoveHorses());
+
+	// Mount or dismount all guards that have horses
+	class MenuItemMountDismount : public MenuItemDefault { public: MenuItemMountDismount():MenuItemDefault("Mount / dismount"){}; void OnSelect() override {
+		if (g_activeSquad < 0 || g_activeSquad >= (int)g_squads.size()) { A11y::speak(L"no squad", true); return; }
+		auto &sq = g_squads[g_activeSquad]; if (sq.guards.empty()) { A11y::speak(L"no guards", true); return; }
+		int toggled = 0;
+		for (auto &gi : sq.guards) {
+			if (!gi.ped || !gi.horse) continue;
+			if (!ENTITY::DOES_ENTITY_EXIST(gi.ped) || !ENTITY::DOES_ENTITY_EXIST(gi.horse)) continue;
+			bool on = PED::IS_PED_ON_MOUNT(gi.ped) ? true : false;
+			if (!on) {
+				// No explicit mount native in our headers; guide ped onto horse using task and proximity
+				AI::TASK_CLEAR_LOOK_AT(gi.ped);
+				// Walk to the horse and try to mount via contextual use
+				Vector3 hpos = ENTITY::GET_ENTITY_COORDS(gi.horse, TRUE, FALSE);
+				AI::TASK_GO_TO_COORD_ANY_MEANS(gi.ped, hpos.x, hpos.y, hpos.z, 2.0f, 0, FALSE, 0, 0.0f);
+				// Encourage association by following/stand still on horse
+				AI::TASK_STAND_STILL(gi.horse, 3000);
+			} else {
+				// Dismount: SDK header lacks a specific dismount native; clear tasks to force leaving mount
+				AI::CLEAR_PED_TASKS(gi.ped, TRUE, TRUE);
+			}
+			++toggled;
+		}
+		wchar_t buf[64]; swprintf_s(buf, L"%d toggled", toggled); A11y::speak(buf, true);
+	}}; menu->AddItem(new MenuItemMountDismount());
+	controller->RegisterMenu(menu);
+	menu->AddItem(new MenuItemSpeakOnSelect("Give horses", L"give horses"));
+	menu->AddItem(new MenuItemSpeakOnSelect("Remove horses", L"remove horses"));
+	menu->AddItem(new MenuItemSpeakOnSelect("Mount / dismount", L"mount or dismount"));
+	return menu;
+}
+
+static MenuBase* CreateGuardFormationsMenu(MenuController* controller)
+{
+	auto menu = new MenuBase(new MenuItemListTitle("FORMATIONS"));
+	controller->RegisterMenu(menu);
+	class MenuItemSetFormation : public MenuItemDefault {
+		GuardFormation m_f; std::wstring m_w;
+	public:
+		MenuItemSetFormation(const char* caption, GuardFormation f, const std::wstring &w)
+			: MenuItemDefault(caption), m_f(f), m_w(w) {}
+		void OnSelect() override {
+			g_activeFormation = m_f;
+			if (!m_w.empty()) A11y::speak(m_w, true);
+		}
+	};
+	menu->AddItem(new MenuItemSetFormation("Column", GuardFormation::Column, L"column"));
+	menu->AddItem(new MenuItemSetFormation("Line", GuardFormation::Line, L"line"));
+	menu->AddItem(new MenuItemSetFormation("Wedge", GuardFormation::Wedge, L"wedge"));
+	return menu;
+}
+
+static MenuBase* CreateGuardCommandsMenu(MenuController* controller)
+{
+	auto menu = new MenuBase(new MenuItemListTitle("COMMANDS"));
+	controller->RegisterMenu(menu);
+	menu->AddItem(new MenuItemSpeakOnSelect("Follow", L"follow"));
+	menu->AddItem(new MenuItemSpeakOnSelect("Hold", L"hold"));
+	menu->AddItem(new MenuItemSpeakOnSelect("Defend me", L"defend me"));
+	menu->AddItem(new MenuItemSpeakOnSelect("Guard area", L"guard area"));
+	menu->AddItem(new MenuItemSpeakOnSelect("Attack aimed target", L"attack aimed target"));
+	return menu;
+}
+
+static MenuBase* CreateGuardManagerMenu(MenuController* controller)
+{
+	auto menu = new MenuBase(new MenuItemTitle("GUARD  MANAGER"));
+	controller->RegisterMenu(menu);
+	menu->AddItem(new MenuItemMenu("SQUADS", CreateGuardSquadsMenu(controller)));
+	menu->AddItem(new MenuItemMenu("GUARDS", CreateGuardRosterMenu(controller)));
+	menu->AddItem(new MenuItemMenu("WEAPONS", CreateGuardWeaponsMenu(controller)));
+	menu->AddItem(new MenuItemMenu("MOUNTS", CreateGuardMountsMenu(controller)));
+	menu->AddItem(new MenuItemMenu("FORMATIONS", CreateGuardFormationsMenu(controller)));
+	menu->AddItem(new MenuItemMenu("COMMANDS", CreateGuardCommandsMenu(controller)));
 	return menu;
 }
 
@@ -1592,6 +2165,8 @@ void main()
 {
 	auto menuController = new MenuController();
 	auto mainMenu = CreateMainMenu(menuController);
+	// Pre-create Guard Manager menu (opened only in Bodyguard mode via Numpad '.')
+	MenuBase* guardManagerMenu = CreateGuardManagerMenu(menuController);
 	// One-time ready announcement
 	static bool greeted = false;
 	if (!greeted) {
@@ -1897,17 +2472,7 @@ void main()
 			// 2: horse location (zone)
 			if (IsKeyJustUp(VK_NUMPAD2)) {
 				Ped me = PLAYER::PLAYER_PED_ID(); Vector3 c = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
-				const char* gxt = reinterpret_cast<const char*>(static_cast<uintptr_t>(ZONE::_0x43AD8FC02B429D33(c.x, c.y, c.z, 0)));
-				const char* text = nullptr;
-				if (gxt && *gxt) {
-					// If this is a GXT key, translate it; otherwise, treat as already-localized text
-					if (UI::DOES_TEXT_LABEL_EXIST(const_cast<char*>(gxt))) {
-						text = UI::_GET_LABEL_TEXT(const_cast<char*>(gxt));
-					} else {
-						text = gxt;
-					}
-				}
-				if (text && *text) { wchar_t w[128]; size_t n=strlen(text); if(n>127)n=127; size_t cv=0; mbstowcs_s(&cv,w,128,text,n); w[n]=L'\0'; A11y::speak(w, true);} else A11y::speak(L"unknown", true);
+				std::wstring wlab; if (TryGetZoneLabelAt(c, wlab)) A11y::speak(wlab, true); else A11y::speak(L"unknown", true);
 			}
 			if (IsKeyJustUp(VK_NUMPAD3)) {
 				Ped playerPed = PLAYER::PLAYER_PED_ID();
@@ -2052,6 +2617,249 @@ void main()
 					Ped me = PLAYER::PLAYER_PED_ID(); AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(g_bodyguard, me, 0.0f, -1.4f, 0.0f, 3.0f, -1, 1.5f, TRUE, FALSE, FALSE, FALSE, FALSE);
 					g_bodyguardLastTaskMs = GetTickCount(); A11y::speak(L"following", true);
 				} else A11y::speak(L"no bodyguard", true);
+			}
+		}
+
+		// Bodyguard mode: squad hotkeys outside menu for quick control
+		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Bodyguard)
+		{
+			// Numpad 7: Follow me (active squad) using current formation
+			if (IsKeyJustUp(VK_NUMPAD7))
+			{
+				if (g_activeSquad < 0 || g_activeSquad >= (int)g_squads.size()) { A11y::speak(L"no squad", true); }
+				else {
+					Ped me = PLAYER::PLAYER_PED_ID(); if (!ENTITY::DOES_ENTITY_EXIST(me)) { A11y::speak(L"no player", true); }
+					else {
+						int i = 0; int applied = 0;
+						for (auto &gi : g_squads[g_activeSquad].guards) {
+							Ped p = gi.ped; if (!p || !ENTITY::DOES_ENTITY_EXIST(p) || ENTITY::IS_ENTITY_DEAD(p)) continue;
+							bool mounted = PED::IS_PED_ON_MOUNT(p) ? true : false;
+							float ox=0.0f, oy=0.0f; GetFormationOffset(i, g_activeFormation, mounted, ox, oy); ++i;
+							AI::TASK_CLEAR_LOOK_AT(p);
+							CommandGuardFollowOffset(gi, me, ox, oy);
+							++applied;
+						}
+						g_activeSquadOrder = SquadOrder::Follow;
+						wchar_t buf[64]; swprintf_s(buf, L"follow %d", applied); A11y::speak(buf, true);
+					}
+				}
+			}
+	    // Numpad 8: Hold position (stand still for a while)
+			if (IsKeyJustUp(VK_NUMPAD8))
+			{
+				if (g_activeSquad < 0 || g_activeSquad >= (int)g_squads.size()) { A11y::speak(L"no squad", true); }
+				else {
+					int applied = 0;
+					for (auto &gi : g_squads[g_activeSquad].guards) {
+						Ped p = gi.ped; if (!p || !ENTITY::DOES_ENTITY_EXIST(p) || ENTITY::IS_ENTITY_DEAD(p)) continue;
+						AI::CLEAR_PED_TASKS(p, TRUE, TRUE);
+						AI::TASK_STAND_STILL(p, 15000);
+						++applied;
+					}
+		    g_activeSquadOrder = SquadOrder::Hold;
+					wchar_t buf[64]; swprintf_s(buf, L"hold %d", applied); A11y::speak(buf, true);
+				}
+			}
+			// Numpad 9: Guard here (stand guard around player position)
+			if (IsKeyJustUp(VK_NUMPAD9))
+			{
+				if (g_activeSquad < 0 || g_activeSquad >= (int)g_squads.size()) { A11y::speak(L"no squad", true); }
+				else {
+					Ped me = PLAYER::PLAYER_PED_ID(); if (!ENTITY::DOES_ENTITY_EXIST(me)) { A11y::speak(L"no player", true); }
+					else {
+						Vector3 c = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
+						float baseH = ENTITY::GET_ENTITY_HEADING(me);
+						int applied = 0; int i = 0;
+						static const float ring[5][3] = { {1.5f,0.0f,0.0f}, {-1.5f,0.0f,0.0f}, {0.0f,1.5f,0.0f}, {0.0f,-1.5f,0.0f}, {2.0f,0.8f,0.0f} };
+						for (auto &gi : g_squads[g_activeSquad].guards) {
+							Ped p = gi.ped; if (!p || !ENTITY::DOES_ENTITY_EXIST(p) || ENTITY::IS_ENTITY_DEAD(p)) continue;
+							float dx = ring[i%5][0], dy = ring[i%5][1]; ++i;
+							float hx = c.x + dx, hy = c.y + dy, hz = c.z + ring[(i-1)%5][2];
+							AI::CLEAR_PED_TASKS(p, TRUE, TRUE);
+							AI::TASK_STAND_GUARD(p, hx, hy, hz, baseH, (char*)"WORLD_HUMAN_STAND_GUARD");
+							++applied;
+						}
+						g_activeSquadOrder = SquadOrder::GuardHere; g_guardHerePos = c;
+						wchar_t buf[64]; swprintf_s(buf, L"guard %d", applied); A11y::speak(buf, true);
+					}
+				}
+			}
+			// Numpad 6: Toggle auto-defense system (30m protection radius)
+			if (IsKeyJustUp(VK_NUMPAD6))
+			{
+				g_autoDefenseEnabled = !g_autoDefenseEnabled;
+				if (g_autoDefenseEnabled) {
+					A11y::speak(L"Protection activated. Guards on duty.", true);
+				} else {
+					A11y::speak(L"Protection deactivated. Stand down.", true);
+				}
+			}
+			// Numpad 0: Regroup to me (teleport into formation slots)
+			if (IsKeyJustUp(VK_NUMPAD0))
+			{
+				if (g_activeSquad < 0 || g_activeSquad >= (int)g_squads.size()) { A11y::speak(L"no squad", true); }
+				else {
+					Ped me = PLAYER::PLAYER_PED_ID(); if (!ENTITY::DOES_ENTITY_EXIST(me)) { A11y::speak(L"no player", true); }
+					else {
+						int i = 0; int applied = 0;
+						for (auto &gi : g_squads[g_activeSquad].guards) {
+							Ped p = gi.ped; if (!p || !ENTITY::DOES_ENTITY_EXIST(p) || ENTITY::IS_ENTITY_DEAD(p)) continue;
+							bool mounted = PED::IS_PED_ON_MOUNT(p) ? true : false;
+							float ox=0.0f, oy=0.0f; GetFormationOffset(i, g_activeFormation, mounted, ox, oy); ++i;
+							Vector3 to = ENTITY::GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS(me, ox, oy, 0.0f);
+							// If mounted, teleport the horse first to avoid separation
+							if (mounted && gi.horse && ENTITY::DOES_ENTITY_EXIST(gi.horse)) {
+								ENTITY::SET_ENTITY_COORDS(gi.horse, to.x, to.y, to.z, FALSE, FALSE, FALSE, TRUE);
+							}
+							ENTITY::SET_ENTITY_COORDS(p, to.x, to.y, to.z, FALSE, FALSE, FALSE, TRUE);
+							++applied;
+						}
+						g_activeSquadOrder = SquadOrder::Follow;
+						wchar_t buf[64]; swprintf_s(buf, L"regroup %d", applied); A11y::speak(buf, true);
+					}
+				}
+			}
+		}
+
+		// Patrol maintenance: every ~8 seconds, if Patrol order is active, issue small wander tasks around player (tighter range to feel less random)
+		if (g_a11yMode == A11yMode::Bodyguard && g_activeSquad >= 0 && g_activeSquad < (int)g_squads.size()) {
+			DWORD now = GetTickCount();
+			if (g_activeSquadOrder == SquadOrder::Patrol && now - g_lastPatrolTickMs > 8000) {
+				Ped me = PLAYER::PLAYER_PED_ID(); if (ENTITY::DOES_ENTITY_EXIST(me)) {
+					Vector3 c = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
+					int i = 0;
+					for (auto &gi : g_squads[g_activeSquad].guards) {
+						Ped p = gi.ped; if (!p || !ENTITY::DOES_ENTITY_EXIST(p) || ENTITY::IS_ENTITY_DEAD(p)) continue;
+						float rx = ((GAMEPLAY::GET_RANDOM_INT_IN_RANGE(-100,101))/100.0f) * 2.5f; // +/-2.5m
+						float ry = ((GAMEPLAY::GET_RANDOM_INT_IN_RANGE(-100,101))/100.0f) * 2.5f;
+						AI::TASK_WANDER_IN_AREA(p, c.x + rx, c.y + ry, c.z, 4.0f, 1.8f, 3.5f, TRUE);
+						++i;
+					}
+				}
+				g_lastPatrolTickMs = now;
+			}
+		}
+
+		// Squad auto-defense: regularly scan for attackers near the player and engage automatically (except when on Hold)
+		if (g_a11yMode == A11yMode::Bodyguard && g_activeSquad >= 0 && g_activeSquad < (int)g_squads.size()) {
+			DWORD now = GetTickCount();
+			if (now - g_lastGuardDefenseTickMs > 700) {
+				g_lastGuardDefenseTickMs = now;
+				if (g_activeSquadOrder != SquadOrder::Hold) {
+					Ped me = PLAYER::PLAYER_PED_ID();
+					if (ENTITY::DOES_ENTITY_EXIST(me)) {
+						// Build a small list of current attackers/threat suspects
+						Ped attackers[24]; int attackerN = 0;
+						Vector3 meC = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
+						int packed[33] = { 32 };
+						int count = PED::GET_PED_NEARBY_PEDS(me, packed, -1, 0);
+						bool meleeDanger = PED::IS_PED_IN_MELEE_COMBAT(me) ? true : false;
+						if (count > 0) {
+							int lim = packed[0]; if (lim > 32) lim = 32;
+							for (int i = 1; i <= lim; ++i) {
+								Ped q = (Ped)packed[i];
+								if (!q || q == me) continue;
+								if (!ENTITY::DOES_ENTITY_EXIST(q) || ENTITY::IS_ENTITY_DEAD(q) || PED::IS_PED_A_PLAYER(q)) continue;
+								Vector3 qc = ENTITY::GET_ENTITY_COORDS(q, TRUE, FALSE);
+								float d = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(meC.x, meC.y, meC.z, qc.x, qc.y, qc.z, TRUE);
+								if (d > 65.0f) continue;
+								bool shot = PED::IS_PED_SHOOTING(q) ? true : false;
+								bool attackingMe = PED::IS_PED_IN_COMBAT(q, me) ? true : false;
+								bool damaged = ENTITY::HAS_ENTITY_BEEN_DAMAGED_BY_ENTITY(me, q, TRUE, FALSE) ? true : false;
+								bool closeMelee = (d < 6.5f) && (PED::IS_PED_IN_MELEE_COMBAT(q) || meleeDanger);
+								if (shot || attackingMe || damaged || closeMelee) {
+									if (attackerN < 24) attackers[attackerN++] = q;
+								}
+							}
+						}
+						if (attackerN > 0) {
+							// Order each guard to engage one of the attackers; keep it lightweight to avoid task spam
+							auto &sq = g_squads[g_activeSquad]; int idx = 0;
+							for (auto &gi : sq.guards) {
+								Ped gp = gi.ped; if (!gp || !ENTITY::DOES_ENTITY_EXIST(gp) || ENTITY::IS_ENTITY_DEAD(gp)) continue;
+								if (PED::IS_PED_IN_COMBAT(gp, 0)) continue; // already fighting
+								Ped tgt = attackers[idx % attackerN]; idx++;
+								PED::SET_PED_COMBAT_ABILITY(gp, 2);
+								PED::SET_PED_COMBAT_MOVEMENT(gp, 2);
+								PED::SET_PED_FLEE_ATTRIBUTES(gp, 0, FALSE);
+								PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(gp, TRUE);
+								AI::TASK_COMBAT_PED(gp, tgt, 0, 0);
+							}
+							// Clear last damage so we don't retrigger endlessly on old hits
+							ENTITY::CLEAR_ENTITY_LAST_DAMAGE_ENTITY(me);
+						}
+					}
+				}
+			}
+			// Formation maintenance: every ~1.2s gently refresh follow tasks to maintain spacing
+			if (g_activeSquadOrder == SquadOrder::Follow && (GetTickCount() - g_lastFormationTickMs) > 1200) {
+				g_lastFormationTickMs = GetTickCount();
+				Ped me = PLAYER::PLAYER_PED_ID(); if (ENTITY::DOES_ENTITY_EXIST(me)) {
+					int i = 0;
+					for (auto &gi : g_squads[g_activeSquad].guards) {
+						Ped p = gi.ped; if (!p || !ENTITY::DOES_ENTITY_EXIST(p) || ENTITY::IS_ENTITY_DEAD(p)) continue;
+						bool mounted = PED::IS_PED_ON_MOUNT(p) ? true : false;
+						float ox=0.0f, oy=0.0f; GetFormationOffset(i, g_activeFormation, mounted, ox, oy); ++i;
+						CommandGuardFollowOffset(gi, me, ox, oy);
+					}
+				}
+			}
+			// Mount enforcement: make sure each guard stays mounted if a horse exists
+			if ((GetTickCount() - g_lastMountEnforceTickMs) > 1500) {
+				g_lastMountEnforceTickMs = GetTickCount();
+				for (auto &gi : g_squads[g_activeSquad].guards) {
+					if (!gi.ped || !ENTITY::DOES_ENTITY_EXIST(gi.ped) || !gi.horse || !ENTITY::DOES_ENTITY_EXIST(gi.horse)) continue;
+					bool on = PED::IS_PED_ON_MOUNT(gi.ped) ? true : false;
+					if (!on) {
+						// Walk to horse; keep horse still for a moment
+						Vector3 hp = ENTITY::GET_ENTITY_COORDS(gi.horse, TRUE, FALSE);
+						AI::TASK_STAND_STILL(gi.horse, 2200);
+						AI::TASK_GO_TO_COORD_ANY_MEANS(gi.ped, hp.x, hp.y, hp.z, 2.6f, 0, FALSE, 0, 0.0f);
+					}
+				}
+			}
+			// Crowd control: keep a calm bubble around player and clear path ahead
+			if ((GetTickCount() - g_lastCrowdControlTickMs) > 900) {
+				g_lastCrowdControlTickMs = GetTickCount();
+				Ped me = PLAYER::PLAYER_PED_ID(); if (ENTITY::DOES_ENTITY_EXIST(me)) {
+					Vector3 meC = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
+					// Desired bubble radius larger when we are mounted to give space
+					bool playerMounted = PED::IS_PED_ON_MOUNT(me) ? true : false;
+					float bubbleR = playerMounted ? 5.0f : 3.4f;
+					int packed[33] = { 32 };
+					int count = PED::GET_PED_NEARBY_PEDS(me, packed, -1, 0);
+					if (count > 0) {
+						int lim = packed[0]; if (lim > 32) lim = 32;
+						for (int i = 1; i <= lim; ++i) {
+							Ped p = (Ped)packed[i]; if (!p || p == me) continue;
+							if (!ENTITY::DOES_ENTITY_EXIST(p) || ENTITY::IS_ENTITY_DEAD(p) || PED::IS_PED_A_PLAYER(p)) continue;
+							if (IsOurGuard(p) || IsOurHorse(p)) continue; // don't push our squad
+							Vector3 pc = ENTITY::GET_ENTITY_COORDS(p, TRUE, FALSE);
+							float d = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(meC.x, meC.y, meC.z, pc.x, pc.y, pc.z, TRUE);
+							if (d < bubbleR) {
+								// Non-violent nudge: ask the nearest guard to escort this ped a few meters away
+								Ped escort = 0; float best = 99999.0f;
+								for (auto &gi : g_squads[g_activeSquad].guards) {
+									if (!gi.ped || !ENTITY::DOES_ENTITY_EXIST(gi.ped) || ENTITY::IS_ENTITY_DEAD(gi.ped)) continue;
+									Vector3 gc = ENTITY::GET_ENTITY_COORDS(gi.ped, TRUE, FALSE);
+									float dd = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(gc.x, gc.y, gc.z, pc.x, pc.y, pc.z, TRUE);
+									if (dd < best) { best = dd; escort = gi.ped; }
+								}
+								if (escort) {
+									// Pick a point slightly further from player in the same direction
+									Vector3 dir = { pc.x - meC.x, pc.y - meC.y, 0.0f };
+									float len = sqrtf(dir.x*dir.x + dir.y*dir.y);
+									if (len < 0.001f) len = 0.001f; dir.x/=len; dir.y/=len;
+									float pushDist = playerMounted ? 6.0f : 4.0f;
+									Vector3 tgt = { meC.x + dir.x * (pushDist + 1.0f), meC.y + dir.y * (pushDist + 1.0f), pc.z };
+									// Ask stranger to move (task go to), and guard to accompany nearby
+									AI::TASK_GO_TO_COORD_ANY_MEANS(p, tgt.x, tgt.y, tgt.z, 1.4f, 0, FALSE, 0, 0.0f);
+									AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(escort, p, 0.0f, -1.5f, 0.0f, 1.6f, 2200, 1.2f, TRUE, FALSE, FALSE, FALSE, FALSE);
+								}
+							}
+						}
+					}
+				}
 			}
 		}
 
@@ -2205,21 +3013,22 @@ void main()
 		// NumPad 4 (Global): On-demand location (zone/place)
 		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Global && IsKeyJustUp(VK_NUMPAD4))
 		{
-			Ped me = PLAYER::PLAYER_PED_ID(); if (ENTITY::DOES_ENTITY_EXIST(me)) {
-				Vector3 meC = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
-				const char* gxt = reinterpret_cast<const char*>(static_cast<uintptr_t>(ZONE::_0x43AD8FC02B429D33(meC.x, meC.y, meC.z, 0)));
-				const char* text = nullptr;
-				if (gxt && *gxt) {
-					if (UI::DOES_TEXT_LABEL_EXIST(const_cast<char*>(gxt))) {
-						text = UI::_GET_LABEL_TEXT(const_cast<char*>(gxt));
-					} else {
-						text = gxt;
-					}
+			// Defer location lookup until the game is fully ready
+			Player player = PLAYER::PLAYER_ID();
+			if (GetTickCount() - startupMs < 6000 || !PLAYER::IS_PLAYER_CONTROL_ON(player) || !CAM::IS_SCREEN_FADED_IN() || DLC2::GET_IS_LOADING_SCREEN_ACTIVE()) {
+				// not ready yet; ignore to avoid false "unknown"/spam
+			} else {
+				Ped me = PLAYER::PLAYER_PED_ID(); if (ENTITY::DOES_ENTITY_EXIST(me)) {
+					Vector3 meC = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
+					std::wstring wlab; if (TryGetZoneLabelAt(meC, wlab)) {
+						DWORD now = GetTickCount();
+						if (wcscmp(wlab.c_str(), g_lastZone) != 0 || (now - g_lastZoneSpeakMs) > 600) {
+							wcsncpy_s(g_lastZone, wlab.c_str(), _TRUNCATE);
+							g_lastZoneSpeakMs = now;
+							A11y::speak(wlab, true);
+						}
+					} else { A11y::speak(L"unknown", true); }
 				}
-				if (text && *text) {
-					wchar_t wlab[128]; size_t n = strlen(text); if (n > 127) n = 127; size_t converted=0; mbstowcs_s(&converted, wlab, 128, text, n);
-					wlab[n] = L'\0'; A11y::speak(wlab, true);
-				} else { A11y::speak(L"unknown", true); }
 			}
 		}
 
@@ -2284,14 +3093,22 @@ void main()
 			}
 		}
 
-		// NumPad .: Global -> speak heading only
-		if (!menuController->HasActiveMenu() && IsKeyJustUp(VK_DECIMAL))
+		// NumPad '.':
+		// - Global mode: speak heading (existing behavior)
+		// - Bodyguard mode: open Guard Manager menu
+		if (IsKeyJustUp(VK_DECIMAL))
 		{
-			if (g_a11yMode == A11yMode::Global) {
-				Vector3 camRot = CAM::GET_GAMEPLAY_CAM_ROT(2);
-				int b = HeadingBucket(camRot.z);
-				const wchar_t* wname = BucketName8(b);
-				if (wname && *wname) A11y::speak(wname, true); else A11y::speak(L"heading", true);
+			if (!menuController->HasActiveMenu()) {
+				if (g_a11yMode == A11yMode::Global) {
+					Vector3 camRot = CAM::GET_GAMEPLAY_CAM_ROT(2);
+					int b = HeadingBucket(camRot.z);
+					const wchar_t* wname = BucketName8(b);
+					if (wname && *wname) A11y::speak(wname, true); else A11y::speak(L"heading", true);
+				} else if (g_a11yMode == A11yMode::Bodyguard) {
+					MenuInput::MenuInputBeep();
+					menuController->PushMenu(guardManagerMenu);
+					A11y::speak(L"Guard Manager", true);
+				}
 			}
 		}
 
@@ -2329,30 +3146,24 @@ void main()
 			// Zone/place change announcement
 			if (g_enableAutoZones)
 			{
+				// Skip auto zone announcements until the game is fully ready
+				Player player = PLAYER::PLAYER_ID();
+				if (GetTickCount() - startupMs >= 6000 && PLAYER::IS_PLAYER_CONTROL_ON(player) && CAM::IS_SCREEN_FADED_IN() && !DLC2::GET_IS_LOADING_SCREEN_ACTIVE())
+				{
 				Ped me = PLAYER::PLAYER_PED_ID();
 				if (ENTITY::DOES_ENTITY_EXIST(me)) {
 					Vector3 meC = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
-					// Call hashed native directly to avoid modifying headers
-					const char* gxt = reinterpret_cast<const char*>(static_cast<uintptr_t>(ZONE::_0x43AD8FC02B429D33(meC.x, meC.y, meC.z, 0)));
-					const char* text = nullptr;
-					if (gxt && *gxt) {
-						if (UI::DOES_TEXT_LABEL_EXIST(const_cast<char*>(gxt))) {
-							text = UI::_GET_LABEL_TEXT(const_cast<char*>(gxt));
-						} else {
-							text = gxt;
-						}
-					}
-					if (text && *text) {
-						wchar_t wlab[128]; wlab[0] = L'\0';
-						size_t n = strlen(text); if (n > 127) n = 127; size_t converted=0; mbstowcs_s(&converted, wlab, 128, text, n);
-						if (wlab[0]) {
-							if (wcscmp(wlab, g_lastZone) != 0 && (now - g_lastZoneSpeakMs) > 600) {
-								wcsncpy_s(g_lastZone, wlab, _TRUNCATE);
+					std::wstring wlab;
+					if (TryGetZoneLabelAt(meC, wlab)) {
+						if (!wlab.empty()) {
+							if (wcscmp(wlab.c_str(), g_lastZone) != 0 && (now - g_lastZoneSpeakMs) > 600) {
+								wcsncpy_s(g_lastZone, wlab.c_str(), _TRUNCATE);
 								g_lastZoneSpeakMs = now;
 								A11y::speak(wlab, true);
 							}
 						}
 					}
+				}
 				}
 			}
 			// Heading announcements (8-way cardinal) on bucket change
@@ -2987,6 +3798,81 @@ void main()
 
 			// (camera pitch beep removed)
 		}
+
+		// Riot mode maintenance: periodically make nearby peds fight each other
+		if (g_riotEnabled)
+		{
+			DWORD now = GetTickCount();
+			if (now - g_lastRiotTickMs > 900)
+			{
+				g_lastRiotTickMs = now;
+				Ped me = PLAYER::PLAYER_PED_ID();
+				if (ENTITY::DOES_ENTITY_EXIST(me))
+				{
+					int packed[33] = { 32 };
+					int count = PED::GET_PED_NEARBY_PEDS(me, packed, -1, 0);
+					if (count > 0)
+					{
+						int lim = packed[0]; if (lim > 32) lim = 32;
+						// Collect a small set within 60m
+						Ped list[32]; int n = 0;
+						Vector3 meC = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
+						for (int i = 1; i <= lim && n < 32; ++i)
+						{
+							Ped p = (Ped)packed[i]; if (!p || p == me) continue;
+							if (!ENTITY::DOES_ENTITY_EXIST(p) || ENTITY::IS_ENTITY_DEAD(p) || PED::IS_PED_A_PLAYER(p)) continue;
+							Vector3 pc = ENTITY::GET_ENTITY_COORDS(p, TRUE, FALSE);
+							float d = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(meC.x, meC.y, meC.z, pc.x, pc.y, pc.z, TRUE);
+							if (d <= 60.0f) list[n++] = p;
+						}
+						if (n >= 2)
+						{
+							for (int i = 0; i < n; ++i)
+							{
+								Ped a = list[i]; if (!a || ENTITY::IS_ENTITY_DEAD(a)) continue;
+								if (!PED::IS_PED_IN_COMBAT(a, 0))
+								{
+									// Pick a random opponent different from 'a'
+									int tries = 6;
+									while (tries-- > 0)
+									{
+										int j = rand() % n; if (j == i) continue; Ped b = list[j];
+										if (!b || ENTITY::IS_ENTITY_DEAD(b)) continue;
+										// Make them aggressive and fight
+										PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(a, TRUE);
+										PED::SET_PED_COMBAT_ABILITY(a, 2);
+										PED::SET_PED_COMBAT_MOVEMENT(a, 2);
+										PED::SET_PED_FLEE_ATTRIBUTES(a, 0, FALSE);
+										AI::TASK_COMBAT_PED(a, b, 0, 0);
+										break;
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
+	// Guard squads ammo maintenance: keep infinite ammo state consistent
+		if (!g_squads.empty())
+		{
+			for (auto &sq : g_squads)
+			{
+				for (auto &gi : sq.guards)
+				{
+					Ped p = gi.ped; if (!p || !ENTITY::DOES_ENTITY_EXIST(p) || ENTITY::IS_ENTITY_DEAD(p)) continue;
+					if (g_guardsInfiniteAmmo) {
+						WEAPON::SET_PED_INFINITE_AMMO(p, TRUE, 0);
+					}
+		    // No per-clip adjustments for now (stability)
+				}
+			}
+		}
+		
+		// Auto-Defense System: scan for hostile entities and eliminate them
+		ScanAndEliminateHostiles();
+		
 		menuController->Update();
 		WAIT(0);
 	}
@@ -3012,3 +3898,72 @@ static bool TryReadHonor(int& outHonor)
 	}
 	return false;
 }
+
+// Safely resolve a zone/place label for coordinates without dereferencing invalid pointers.
+// Returns true and fills outW on success.
+static bool TryGetZoneLabelAt(const Vector3& pos, std::wstring& outW)
+{
+	outW.clear();
+	// Try multiple zone modes (territory/state/city etc.)
+	for (int mode = 0; mode <= 7; ++mode)
+	{
+		uintptr_t raw = (uintptr_t)ZONE::_0x43AD8FC02B429D33(pos.x, pos.y, pos.z, mode);
+		if (!raw) continue;
+		// Ensure the returned value points to a readable C-string before use
+		const char* gxt = reinterpret_cast<const char*>(raw);
+		if (IsBadStringPtrA(gxt, 1)) { DebugLog::log("ZONE 0x43AD... mode=%d returned non-string ptr=0x%p", mode, (void*)raw); continue; } // not a valid string pointer; likely a hash/ID
+		if (!*gxt || _stricmp(gxt, "NULL") == 0) continue;
+
+		const char* text = nullptr;
+		// If it's a known GXT label, fetch localized text; otherwise assume it's literal
+		if (UI::DOES_TEXT_LABEL_EXIST(const_cast<char*>(gxt)))
+		{
+			const char* t = UI::_GET_LABEL_TEXT(const_cast<char*>(gxt));
+			if (t && !IsBadStringPtrA(t, 1) && *t) text = t;
+		}
+		else
+		{
+			// Some RDR2 labels are already plain text (e.g., "Valentine"); use as-is
+			text = gxt;
+		}
+
+		if (text && !IsBadStringPtrA(text, 1) && *text)
+		{
+			// Convert to wide
+			size_t n = strlen(text); if (n > 255) n = 255;
+			wchar_t wbuf[260]; size_t cv = 0; mbstowcs_s(&cv, wbuf, 260, text, n);
+			if (wbuf[0]) { DebugLog::log("ZONE 0x43AD... mode=%d gxt='%s' text='%s'", mode, gxt, text); outW.assign(wbuf); return true; }
+		}
+	}
+
+	// Fallback: alternate ZONE native sometimes yields the town/region label
+	{
+		uintptr_t raw = (uintptr_t)ZONE::_0x5BA7A68A346A5A91(pos.x, pos.y, pos.z);
+		if (raw) {
+			const char* gxt = reinterpret_cast<const char*>(raw);
+			if (!IsBadStringPtrA(gxt, 1) && *gxt && _stricmp(gxt, "NULL") != 0) {
+				const char* text = nullptr;
+				if (UI::DOES_TEXT_LABEL_EXIST(const_cast<char*>(gxt))) {
+					const char* t = UI::_GET_LABEL_TEXT(const_cast<char*>(gxt));
+					if (t && !IsBadStringPtrA(t, 1) && *t) text = t;
+				} else {
+					text = gxt; // assume literal
+				}
+				if (text && !IsBadStringPtrA(text, 1) && *text) {
+					size_t n = strlen(text); if (n > 255) n = 255;
+					wchar_t wbuf[260]; size_t cv = 0; mbstowcs_s(&cv, wbuf, 260, text, n);
+					if (wbuf[0]) { DebugLog::log("ZONE 0x5BA7... gxt='%s' text='%s'", gxt, text); outW.assign(wbuf); return true; }
+				} else {
+					DebugLog::log("ZONE 0x5BA7... returned string ptr but not resolved");
+				}
+			} else {
+				DebugLog::log("ZONE 0x5BA7... returned non-string ptr=0x%p", (void*)raw);
+			}
+		}
+	}
+
+	DebugLog::log("Zone label not found at (%.2f, %.2f, %.2f)", pos.x, pos.y, pos.z);
+	return false;
+}
+
+// (moved Guard/Squad data structures near top of file)
