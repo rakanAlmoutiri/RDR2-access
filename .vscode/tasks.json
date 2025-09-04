@@ -154,6 +154,127 @@
 				"$msCompile"
 			],
 			"group": "build"
+		},
+		{
+			"label": "Build Plague System Fix",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/d",
+				"/c",
+				"c:\\Users\\hamad\\projects\\rdr2\\rdr2a11y\\build_all.cmd"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Build Eagle Attack Fix",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/d",
+				"/c",
+				"c:\\Users\\hamad\\projects\\rdr2\\rdr2a11y\\build_all.cmd"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Build Eagle Companion System",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/d",
+				"/c",
+				"c:\\Users\\hamad\\projects\\rdr2\\rdr2a11y\\build_all.cmd"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Build Eagle Persistent System",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/d",
+				"/c",
+				"c:\\Users\\hamad\\projects\\rdr2\\rdr2a11y\\build_all.cmd"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Build Eagle Fix v2",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/d",
+				"/c",
+				"c:\\Users\\hamad\\projects\\rdr2\\rdr2a11y\\build_all.cmd"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Test Build After Fix",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/d",
+				"/c",
+				"c:\\Users\\hamad\\projects\\rdr2\\rdr2a11y\\build_all.cmd"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Build After Structure Fix",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/d",
+				"/c",
+				"c:\\Users\\hamad\\projects\\rdr2\\rdr2a11y\\build_all.cmd"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Final Test Build",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/d",
+				"/c",
+				"c:\\Users\\hamad\\projects\\rdr2\\rdr2a11y\\build_all.cmd"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Build after plague system organization",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/d",
+				"/c",
+				"c:\\Users\\hamad\\projects\\rdr2\\rdr2a11y\\build_all.cmd"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Build after eagle system removal",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/d",
+				"/c",
+				"c:\\Users\\hamad\\projects\\rdr2\\rdr2a11y\\build_all.cmd"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Build after new hotkey organization",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/d",
+				"/c",
+				"c:\\Users\\hamad\\projects\\rdr2\\rdr2a11y\\build_all.cmd"
+			],
+			"group": "build"
 		}
 	]
 }

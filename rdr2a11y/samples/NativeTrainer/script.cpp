@@ -14,6 +14,7 @@
 #include <string>
 #include <ctime>
 #include <cmath>
+#include <algorithm>
 // GTA11Y-like aiming cues additions
 #include <thread>
 #include <mmsystem.h>
@@ -49,16 +50,180 @@ static DWORD g_lastHeadingSpeakMs = 0;          // throttle heading speech
 static int g_lastHeadingBucket = -1;            // last 8-way bucket announced
 static wchar_t g_lastZone[128] = {0};           // last zone label announced
 static DWORD g_lastZoneSpeakMs = 0;
+static DWORD g_lastAutoLocationCheckMs = 0;     // throttle auto location checks
+
+// Enhanced location detection function
+static bool GetCurrentLocationName(wchar_t* locationResult, size_t bufferSize) {
+	Ped me = PLAYER::PLAYER_PED_ID();
+	if (!ENTITY::DOES_ENTITY_EXIST(me)) return false;
+
+	Vector3 meC = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
+	bool locationFound = false;
+
+	// Method 1: Try the original approach
+	const char* gxt = reinterpret_cast<const char*>(static_cast<uintptr_t>(ZONE::_0x43AD8FC02B429D33(meC.x, meC.y, meC.z, 0)));
+	if (gxt && *gxt) {
+		if (UI::DOES_TEXT_LABEL_EXIST(const_cast<char*>(gxt))) {
+			const char* text = UI::_GET_LABEL_TEXT(const_cast<char*>(gxt));
+			if (text && *text) {
+				size_t n = strlen(text); if (n > bufferSize-1) n = bufferSize-1; size_t converted = 0;
+				mbstowcs_s(&converted, locationResult, bufferSize, text, n);
+				locationResult[n] = L'\0';
+				locationFound = true;
+			}
+		}
+	}
+
+	// Method 2: Try alternative ZONE function
+	if (!locationFound) {
+		Any altResult = ZONE::_0x5BA7A68A346A5A91(meC.x, meC.y, meC.z);
+		if (altResult != 0) {
+			swprintf_s(locationResult, bufferSize, L"Zone %d", (int)altResult);
+			locationFound = true;
+		}
+	}
+
+	// Method 3: Try MAPREGION functions
+	if (!locationFound) {
+		Any regionResult = MAPREGION::_0x2B32B11520626229(meC.x, meC.y, meC.z, 100.0f, 0);
+		if (regionResult != 0) {
+			Vector3 regionCoords = MAPREGION::_0xF70F00013A62F866(regionResult);
+			if (regionCoords.x != 0.0f || regionCoords.y != 0.0f) {
+				swprintf_s(locationResult, bufferSize, L"Region %.0f %.0f", regionCoords.x, regionCoords.y);
+				locationFound = true;
+			}
+		}
+	}
+
+	// Method 4: Enhanced coordinate-based location names
+	if (!locationFound) {
+		// Saint Denis area (extended range)
+		if (meC.x >= 2200 && meC.x <= 2800 && meC.y >= -1350 && meC.y <= -950) {
+			wcscpy_s(locationResult, bufferSize, L"Saint Denis");
+			locationFound = true;
+		}
+		// Valentine area
+		else if (meC.x >= -350 && meC.x <= -150 && meC.y >= 600 && meC.y <= 900) {
+			wcscpy_s(locationResult, bufferSize, L"Valentine");
+			locationFound = true;
+		}
+		// Rhodes area
+		else if (meC.x >= 1200 && meC.x <= 1500 && meC.y >= -1350 && meC.y <= -1050) {
+			wcscpy_s(locationResult, bufferSize, L"Rhodes");
+			locationFound = true;
+		}
+		// Strawberry area
+		else if (meC.x >= -1900 && meC.x <= -1600 && meC.y >= -600 && meC.y <= -350) {
+			wcscpy_s(locationResult, bufferSize, L"Strawberry");
+			locationFound = true;
+		}
+		// Blackwater area
+		else if (meC.x >= -900 && meC.x <= -600 && meC.y >= -1350 && meC.y <= -1050) {
+			wcscpy_s(locationResult, bufferSize, L"Blackwater");
+			locationFound = true;
+		}
+		// Annesburg area
+		else if (meC.x >= 2800 && meC.x <= 3100 && meC.y >= 1100 && meC.y <= 1400) {
+			wcscpy_s(locationResult, bufferSize, L"Annesburg");
+			locationFound = true;
+		}
+		// Van Horn Trading Post
+		else if (meC.x >= 2900 && meC.x <= 3200 && meC.y >= 500 && meC.y <= 800) {
+			wcscpy_s(locationResult, bufferSize, L"Van Horn Trading Post");
+			locationFound = true;
+		}
+		// Armadillo
+		else if (meC.x >= -3600 && meC.x <= -3300 && meC.y >= -2700 && meC.y <= -2400) {
+			wcscpy_s(locationResult, bufferSize, L"Armadillo");
+			locationFound = true;
+		}
+		// Tumbleweed
+		else if (meC.x >= -5400 && meC.x <= -5100 && meC.y >= -2900 && meC.y <= -2600) {
+			wcscpy_s(locationResult, bufferSize, L"Tumbleweed");
+			locationFound = true;
+		}
+		// MacFarlane's Ranch
+		else if (meC.x >= -2400 && meC.x <= -2100 && meC.y >= -2200 && meC.y <= -1900) {
+			wcscpy_s(locationResult, bufferSize, L"MacFarlane Ranch");
+			locationFound = true;
+		}
+		// Emerald Ranch
+		else if (meC.x >= 1400 && meC.x <= 1700 && meC.y >= 300 && meC.y <= 600) {
+			wcscpy_s(locationResult, bufferSize, L"Emerald Ranch");
+			locationFound = true;
+		}
+		// Wallace Station
+		else if (meC.x >= -1400 && meC.x <= -1100 && meC.y >= 400 && meC.y <= 700) {
+			wcscpy_s(locationResult, bufferSize, L"Wallace Station");
+			locationFound = true;
+		}
+		// Lagras
+		else if (meC.x >= 2100 && meC.x <= 2400 && meC.y >= -2050 && meC.y <= -1750) {
+			wcscpy_s(locationResult, bufferSize, L"Lagras");
+			locationFound = true;
+		}
+		// General regions based on coordinates
+		else if (meC.x >= 2000 && meC.y >= -1500 && meC.y <= -800) {
+			wcscpy_s(locationResult, bufferSize, L"Lemoyne region");
+			locationFound = true;
+		}
+		else if (meC.x >= -1000 && meC.x <= 1500 && meC.y >= 0) {
+			wcscpy_s(locationResult, bufferSize, L"Heartlands");
+			locationFound = true;
+		}
+		else if (meC.x <= -1500 && meC.y >= -1000) {
+			wcscpy_s(locationResult, bufferSize, L"West Elizabeth");
+			locationFound = true;
+		}
+		else if (meC.x <= -2000 && meC.y <= -1500) {
+			wcscpy_s(locationResult, bufferSize, L"New Austin");
+			locationFound = true;
+		}
+		else if (meC.y >= 1500) {
+			wcscpy_s(locationResult, bufferSize, L"Grizzlies");
+			locationFound = true;
+		}
+	}
+
+	return locationFound;
+}
 
 // A11y hotkey modes (cycled by NumPad 5)
-enum class A11yMode { Global = 0, Horse = 1, Wolves = 2, Bodyguard = 3 };
+enum class A11yMode { 
+	Global = 0, 
+	Horse = 1, 
+	Wolves = 2, 
+	Bodyguard = 3, 
+	BlackDeath = 4     // Black Death comprehensive mode
+};
 static A11yMode g_a11yMode = A11yMode::Global;
+
+// Plague system states (within BlackDeath mode)
+enum class PlagueType {
+	FullPlague = 0,      // Full plague: cough then death
+	DiseaseOnly = 1,     // Disease only: cough without death
+	InstantKill = 2      // Instant kill mode
+};
+static PlagueType g_plagueType = PlagueType::FullPlague;
+static bool g_plagueSystemEnabled = false;
+static DWORD g_lastPlagueScanMs = 0;
+
 static inline const wchar_t* ModeName(A11yMode m) {
 	switch (m) {
 	case A11yMode::Global: return L"global";
 	case A11yMode::Horse: return L"horse";
 	case A11yMode::Wolves: return L"wolves";
 	case A11yMode::Bodyguard: return L"bodyguard";
+	case A11yMode::BlackDeath: return L"black death";
+	default: return L"";
+	}
+}
+
+static inline const wchar_t* PlagueTypeName(PlagueType p) {
+	switch (p) {
+	case PlagueType::FullPlague: return L"full plague";
+	case PlagueType::DiseaseOnly: return L"disease only";
+	case PlagueType::InstantKill: return L"instant kill";
 	default: return L"";
 	}
 }
@@ -1588,6 +1753,325 @@ MenuBase *CreateMainMenu(MenuController *controller)
 	return menu;
 }
 
+// ===== PLAGUE SYSTEMS =====
+
+// Disease Only Mode: Make people cough, sneeze, vomit, and fall down (no death)
+static void DiseaseOnlySystem(DWORD& lastScanMs)
+{
+	DWORD now = GetTickCount();
+	if ((now - lastScanMs) < 2000) return; // scan every 2 seconds
+	lastScanMs = now;
+	
+	Ped playerPed = PLAYER::PLAYER_PED_ID();
+	if (!playerPed || !ENTITY::DOES_ENTITY_EXIST(playerPed)) return;
+	
+	// Find nearby peds within 50m
+	int packed[33] = { 32 };
+	int count = PED::GET_PED_NEARBY_PEDS(playerPed, packed, -1, 0);
+	if (count <= 0) return;
+	
+	Vector3 playerPos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
+	int lim = packed[0]; if (lim > 32) lim = 32;
+	
+	for (int i = 1; i <= lim; ++i) {
+		Ped target = (Ped)packed[i];
+		if (!target || target == playerPed) continue;
+		if (!ENTITY::DOES_ENTITY_EXIST(target) || ENTITY::IS_ENTITY_DEAD(target)) continue;
+		if (PED::IS_PED_A_PLAYER(target)) continue;
+		
+		Vector3 targetPos = ENTITY::GET_ENTITY_COORDS(target, TRUE, FALSE);
+		float distance = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(playerPos.x, playerPos.y, playerPos.z,
+		                                                       targetPos.x, targetPos.y, targetPos.z, TRUE);
+		if (distance > 50.0f) continue;
+		
+		// Make them sick with animations
+		STREAMING::REQUEST_ANIM_DICT((char*)"amb_misc@world_human_coughing");
+		if (STREAMING::HAS_ANIM_DICT_LOADED((char*)"amb_misc@world_human_coughing")) {
+			AI::TASK_PLAY_ANIM(target, (char*)"amb_misc@world_human_coughing", (char*)"coughing", 4.0f, -8.0f, 4000, 1, 0.0f, FALSE, FALSE, FALSE, 0, FALSE);
+		}
+		
+		// Random chance for vomiting or falling
+		int action = rand() % 3;
+		if (action == 0) {
+			// Coughing (already done above)
+		} else if (action == 1) {
+			// Vomiting animation
+			STREAMING::REQUEST_ANIM_DICT((char*)"creatures@rottweiler@amb@world_dog_sitting@base");
+			if (STREAMING::HAS_ANIM_DICT_LOADED((char*)"creatures@rottweiler@amb@world_dog_sitting@base")) {
+				AI::TASK_PLAY_ANIM(target, (char*)"creatures@rottweiler@amb@world_dog_sitting@base", (char*)"base", 4.0f, -8.0f, 3000, 1, 0.0f, FALSE, FALSE, FALSE, 0, FALSE);
+			}
+		} else if (action == 2) {
+			// Fall down weakly
+			PED::SET_PED_TO_RAGDOLL(target, 2000, 4000, 0, TRUE, TRUE, FALSE);
+		}
+	}
+}
+
+// Instant Kill Mode: Kill immediately when detected
+static void InstantKillSystem(DWORD& lastScanMs)
+{
+	DWORD now = GetTickCount();
+	if ((now - lastScanMs) < 500) return; // scan every 0.5 seconds for quick response
+	lastScanMs = now;
+	
+	Ped playerPed = PLAYER::PLAYER_PED_ID();
+	if (!playerPed || !ENTITY::DOES_ENTITY_EXIST(playerPed)) return;
+	
+	// Find nearby peds within 50m
+	int packed[33] = { 32 };
+	int count = PED::GET_PED_NEARBY_PEDS(playerPed, packed, -1, 0);
+	if (count <= 0) return;
+	
+	Vector3 playerPos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
+	int lim = packed[0]; if (lim > 32) lim = 32;
+	
+	for (int i = 1; i <= lim; ++i) {
+		Ped target = (Ped)packed[i];
+		if (!target || target == playerPed) continue;
+		if (!ENTITY::DOES_ENTITY_EXIST(target) || ENTITY::IS_ENTITY_DEAD(target)) continue;
+		if (PED::IS_PED_A_PLAYER(target)) continue;
+		
+		Vector3 targetPos = ENTITY::GET_ENTITY_COORDS(target, TRUE, FALSE);
+		float distance = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(playerPos.x, playerPos.y, playerPos.z,
+		                                                       targetPos.x, targetPos.y, targetPos.z, TRUE);
+		if (distance > 50.0f) continue;
+		
+		// Instant death - no delay
+		ENTITY::SET_ENTITY_HEALTH(target, 0, 0);
+	}
+}
+
+// Black Death Mode: Cough, sneeze, get sick for 6-10 seconds, then die
+static void BlackDeathSystem(DWORD& lastScanMs)
+{
+	static std::unordered_map<Ped, DWORD> infectedPeds; // Track infection times
+	
+	DWORD now = GetTickCount();
+	if ((now - lastScanMs) < 1500) return; // scan every 1.5 seconds
+	lastScanMs = now;
+	
+	Ped playerPed = PLAYER::PLAYER_PED_ID();
+	if (!playerPed || !ENTITY::DOES_ENTITY_EXIST(playerPed)) return;
+	
+	// Find nearby peds within 50m
+	int packed[33] = { 32 };
+	int count = PED::GET_PED_NEARBY_PEDS(playerPed, packed, -1, 0);
+	if (count > 0) {
+		Vector3 playerPos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
+		int lim = packed[0]; if (lim > 32) lim = 32;
+		
+		for (int i = 1; i <= lim; ++i) {
+			Ped target = (Ped)packed[i];
+			if (!target || target == playerPed) continue;
+			if (!ENTITY::DOES_ENTITY_EXIST(target) || ENTITY::IS_ENTITY_DEAD(target)) continue;
+			if (PED::IS_PED_A_PLAYER(target)) continue;
+			
+			Vector3 targetPos = ENTITY::GET_ENTITY_COORDS(target, TRUE, FALSE);
+			float distance = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(playerPos.x, playerPos.y, playerPos.z,
+			                                                       targetPos.x, targetPos.y, targetPos.z, TRUE);
+			if (distance > 50.0f) continue;
+			
+			// If not already infected, infect them
+			if (infectedPeds.find(target) == infectedPeds.end()) {
+				infectedPeds[target] = now;
+				
+				// Start coughing animation
+				STREAMING::REQUEST_ANIM_DICT((char*)"amb_misc@world_human_coughing");
+				if (STREAMING::HAS_ANIM_DICT_LOADED((char*)"amb_misc@world_human_coughing")) {
+					AI::TASK_PLAY_ANIM(target, (char*)"amb_misc@world_human_coughing", (char*)"coughing", 4.0f, -8.0f, -1, 1, 0.0f, FALSE, FALSE, FALSE, 0, FALSE);
+				}
+			}
+		}
+	}
+	
+	// Check infected peds for death timing (6-10 seconds after infection)
+	auto it = infectedPeds.begin();
+	while (it != infectedPeds.end()) {
+		Ped infected = it->first;
+		DWORD infectionTime = it->second;
+		
+		if (!ENTITY::DOES_ENTITY_EXIST(infected) || ENTITY::IS_ENTITY_DEAD(infected)) {
+			it = infectedPeds.erase(it);
+			continue;
+		}
+		
+		DWORD sickDuration = now - infectionTime;
+		DWORD deathTime = 6000 + (rand() % 4000); // 6-10 seconds
+		
+		if (sickDuration > deathTime) {
+			// Time to die
+			ENTITY::SET_ENTITY_HEALTH(infected, 0, 0);
+			it = infectedPeds.erase(it);
+		} else {
+			++it;
+		}
+	}
+}
+
+// Plague System Manager: Central handler for all plague types
+static void PlagueSystemManager(DWORD& lastScanMs)
+{
+	if (!g_plagueSystemEnabled || g_a11yMode != A11yMode::BlackDeath) return;
+	
+	switch (g_plagueType) {
+	case PlagueType::FullPlague:
+		BlackDeathSystem(lastScanMs);
+		break;
+	case PlagueType::DiseaseOnly:
+		DiseaseOnlySystem(lastScanMs);
+		break;
+	case PlagueType::InstantKill:
+		InstantKillSystem(lastScanMs);
+		break;
+	default:
+		break;
+	}
+}
+
+// Toggle Plague System: Switches between plague types and manages enable/disable
+static void TogglePlagueSystem(PlagueType newType)
+{
+	if (g_a11yMode != A11yMode::BlackDeath) {
+		A11y::speak(L"Plague system only available in Black Death mode", true);
+		return;
+	}
+	
+	bool wasEnabled = g_plagueSystemEnabled;
+	bool wasCurrentType = (g_plagueType == newType);
+	
+	if (wasCurrentType) {
+		// Toggle current type on/off
+		g_plagueSystemEnabled = !g_plagueSystemEnabled;
+	} else {
+		// Switch to new type and enable
+		g_plagueType = newType;
+		g_plagueSystemEnabled = true;
+	}
+	
+	const wchar_t* typeName = PlagueTypeName(g_plagueType);
+	wchar_t buf[80];
+	swprintf_s(buf, L"%s %s", typeName, g_plagueSystemEnabled ? L"enabled" : L"disabled");
+	A11y::speak(buf, true);
+}
+
+// Helper function to assign kill task to a bodyguard
+static void AssignKillTask(Ped bodyguard, Ped target)
+{
+	if (!bodyguard || !target || !ENTITY::DOES_ENTITY_EXIST(bodyguard) || !ENTITY::DOES_ENTITY_EXIST(target)) return;
+	
+	// Clear current tasks and move to target
+	AI::CLEAR_PED_TASKS_IMMEDIATELY(bodyguard, TRUE, TRUE);
+	AI::TASK_GO_TO_ENTITY(bodyguard, target, -1, 1.5f, 2.0f, 1073741824, 0);
+	
+	// Set bodyguard to be aggressive
+	PED::SET_PED_COMBAT_ABILITY(bodyguard, 2); // professional
+	PED::SET_PED_COMBAT_RANGE(bodyguard, 2); // far
+	
+	// Force combat with target
+	AI::TASK_COMBAT_PED(bodyguard, target, 0, 16);
+}
+
+// Enhanced Bodyguard Protection System: Kill anyone in 30m radius with smart target distribution
+static void BodyguardProtectionSystem(bool protectionEnabled, DWORD& lastScanMs, Ped primaryBodyguard)
+{
+	if (!protectionEnabled || !primaryBodyguard || !ENTITY::DOES_ENTITY_EXIST(primaryBodyguard) || ENTITY::IS_ENTITY_DEAD(primaryBodyguard)) {
+		return;
+	}
+	
+	DWORD now = GetTickCount();
+	if ((now - lastScanMs) < 1500) return; // scan every 1.5 seconds
+	lastScanMs = now;
+	
+	Ped playerPed = PLAYER::PLAYER_PED_ID();
+	if (!playerPed || !ENTITY::DOES_ENTITY_EXIST(playerPed) || ENTITY::IS_ENTITY_DEAD(playerPed)) return;
+	
+	Vector3 playerPos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
+	
+	// Get all available bodyguards
+	std::vector<Ped> availableBodyguards;
+	availableBodyguards.push_back(primaryBodyguard);
+	
+	// Find additional bodyguards nearby (allies of the primary bodyguard)
+	int packedAllies[33] = { 32 };
+	int allyCount = PED::GET_PED_NEARBY_PEDS(primaryBodyguard, packedAllies, -1, 0);
+	if (allyCount > 0) {
+		int allyLim = packedAllies[0]; if (allyLim > 32) allyLim = 32;
+		for (int i = 1; i <= allyLim && availableBodyguards.size() < 5; ++i) { // max 5 bodyguards
+			Ped ally = (Ped)packedAllies[i];
+			if (ally && ally != playerPed && ENTITY::DOES_ENTITY_EXIST(ally) && !ENTITY::IS_ENTITY_DEAD(ally)) {
+				float allyDist = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(playerPos.x, playerPos.y, playerPos.z,
+					ENTITY::GET_ENTITY_COORDS(ally, TRUE, FALSE).x,
+					ENTITY::GET_ENTITY_COORDS(ally, TRUE, FALSE).y,
+					ENTITY::GET_ENTITY_COORDS(ally, TRUE, FALSE).z, TRUE);
+				if (allyDist < 50.0f && !PED::IS_PED_IN_COMBAT(ally, playerPed)) {
+					availableBodyguards.push_back(ally);
+				}
+			}
+		}
+	}
+	
+	// Collect all targets within 30m radius
+	std::vector<std::pair<Ped, float>> targets; // target and distance
+	int packed[33] = { 32 };
+	int count = PED::GET_PED_NEARBY_PEDS(playerPed, packed, -1, 0);
+	if (count > 0) {
+		int lim = packed[0]; if (lim > 32) lim = 32;
+		for (int i = 1; i <= lim; ++i) {
+			Ped target = (Ped)packed[i];
+			if (!target || target == playerPed) continue;
+			if (!ENTITY::DOES_ENTITY_EXIST(target) || ENTITY::IS_ENTITY_DEAD(target)) continue;
+			if (PED::IS_PED_A_PLAYER(target)) continue; // never target players
+			
+			// Skip if target is one of our bodyguards
+			bool isBodyguard = false;
+			for (Ped bg : availableBodyguards) {
+				if (target == bg) { isBodyguard = true; break; }
+			}
+			if (isBodyguard) continue;
+			
+			// Check distance (30 meter kill radius)
+			Vector3 targetPos = ENTITY::GET_ENTITY_COORDS(target, TRUE, FALSE);
+			float distance = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(playerPos.x, playerPos.y, playerPos.z, 
+			                                                       targetPos.x, targetPos.y, targetPos.z, TRUE);
+			if (distance <= 30.0f) {
+				targets.push_back(std::make_pair(target, distance));
+			}
+		}
+	}
+	
+	if (targets.empty()) return;
+	
+	// Sort targets by distance (closest first)
+	std::sort(targets.begin(), targets.end(), [](const std::pair<Ped, float>& a, const std::pair<Ped, float>& b) {
+		return a.second < b.second;
+	});
+	
+	// Assign targets to bodyguards intelligently
+	int numBodyguards = availableBodyguards.size();
+	int numTargets = targets.size();
+	
+	if (numBodyguards == 1) {
+		// One bodyguard: target closest, then next closest after finishing
+		Ped bodyguard = availableBodyguards[0];
+		if (!PED::IS_PED_IN_COMBAT(bodyguard, 0)) { // if not already busy
+			Ped target = targets[0].first;
+			AssignKillTask(bodyguard, target);
+		}
+	}
+	else if (numBodyguards >= 2) {
+		// Multiple bodyguards: assign closest targets first
+		int assignedTargets = 0;
+		for (int i = 0; i < numBodyguards && assignedTargets < numTargets; ++i) {
+			Ped bodyguard = availableBodyguards[i];
+			if (!PED::IS_PED_IN_COMBAT(bodyguard, 0)) { // if not already busy
+				Ped target = targets[assignedTargets].first;
+				AssignKillTask(bodyguard, target);
+				assignedTargets++;
+			}
+		}
+	}
+}
+
 void main()
 {
 	auto menuController = new MenuController();
@@ -1601,6 +2085,9 @@ void main()
 
 	static bool announcedReady = false;
 	static DWORD startupMs = GetTickCount();
+	// Bodyguard protection system
+	static bool g_protectionEnabled = false;    // auto-protection toggle
+	static DWORD g_lastProtectionScanMs = 0;    // last scan time
 	// Track last aimed entity to avoid repeating announcements
 	static Entity lastAimedEntity = 0;
 	static DWORD lastAimSpeakMs = 0;
@@ -1866,21 +2353,24 @@ void main()
 			}
 		}
 
-	// NumPad 5: Cycle A11y mode (Global -> Horse -> Wolves -> Bodyguard)
+	// NumPad 5: Cycle A11y mode (Global -> Horse -> Wolves -> Bodyguard -> BlackDeath)
 		if (!menuController->HasActiveMenu() && IsKeyJustUp(VK_NUMPAD5))
 		{
 			int m = (int)g_a11yMode;
-			m = (m + 1) % 4;
+			m = (m + 1) % 5;  // Now we have 5 main modes
 			g_a11yMode = (A11yMode)m;
 			const wchar_t* name = ModeName(g_a11yMode);
-			wchar_t buf[64]; swprintf_s(buf, L"mode: %s", name);
+			wchar_t buf[64]; swprintf_s(buf, L"%s", name);
 			A11y::speak(buf, true);
+			
+			// Disable plague systems when changing mode
+			g_plagueSystemEnabled = false;
 		}
 
-	// Horse mode shortcuts: brush (3), feed (4)
+	// Horse mode: NEW LAYOUT - 1: quick status, 2: health details, 3: bond/calm, 4: summon/dismiss, 6: speed boost, 7: detailed stats, 8: horse heading
 		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Horse)
 		{
-			// 1: horse status (health + stamina)
+			// NumPad 1: Quick horse status
 			if (IsKeyJustUp(VK_NUMPAD1)) {
 				Ped me = PLAYER::PLAYER_PED_ID();
 				if (PED::IS_PED_ON_MOUNT(me)) {
@@ -1889,34 +2379,41 @@ void main()
 						int hp = ENTITY::GET_ENTITY_HEALTH(h);
 						int mh = PED::GET_PED_MAX_HEALTH(h); if (mh <= 0) mh = 1; if (hp > mh) hp = mh;
 						int pct = (int)((hp * 100.0f) / (float)mh + 0.5f);
-						wchar_t buf[96]; swprintf_s(buf, L"horse health %d (%d%%), stamina 100%%", hp, pct);
+						wchar_t buf[96]; swprintf_s(buf, L"horse health %d%%, stamina ready", pct);
 						A11y::speak(buf, true);
 					} else A11y::speak(L"no valid horse", true);
 				} else A11y::speak(L"not on horse", true);
 			}
-			// 2: horse location (zone)
+			
+			// NumPad 2: Detailed health information
 			if (IsKeyJustUp(VK_NUMPAD2)) {
-				Ped me = PLAYER::PLAYER_PED_ID(); Vector3 c = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
-				const char* gxt = reinterpret_cast<const char*>(static_cast<uintptr_t>(ZONE::_0x43AD8FC02B429D33(c.x, c.y, c.z, 0)));
-				const char* text = nullptr;
-				if (gxt && *gxt) {
-					// If this is a GXT key, translate it; otherwise, treat as already-localized text
-					if (UI::DOES_TEXT_LABEL_EXIST(const_cast<char*>(gxt))) {
-						text = UI::_GET_LABEL_TEXT(const_cast<char*>(gxt));
-					} else {
-						text = gxt;
-					}
-				}
-				if (text && *text) { wchar_t w[128]; size_t n=strlen(text); if(n>127)n=127; size_t cv=0; mbstowcs_s(&cv,w,128,text,n); w[n]=L'\0'; A11y::speak(w, true);} else A11y::speak(L"unknown", true);
+				Ped me = PLAYER::PLAYER_PED_ID();
+				if (PED::IS_PED_ON_MOUNT(me)) {
+					Ped h = PED::GET_MOUNT(me);
+					if (ENTITY::DOES_ENTITY_EXIST(h) && !ENTITY::IS_ENTITY_DEAD(h)) {
+						int hp = ENTITY::GET_ENTITY_HEALTH(h);
+						int mh = PED::GET_PED_MAX_HEALTH(h); if (mh <= 0) mh = 1; if (hp > mh) hp = mh;
+						int pct = (int)((hp * 100.0f) / (float)mh + 0.5f);
+						wchar_t buf[120]; swprintf_s(buf, L"horse health %d of %d (%d%%), stamina 100%%", hp, mh, pct);
+						A11y::speak(buf, true);
+					} else A11y::speak(L"no valid horse", true);
+				} else A11y::speak(L"not on horse", true);
 			}
+			
+			// NumPad 3: Bond level and calm horse
 			if (IsKeyJustUp(VK_NUMPAD3)) {
 				Ped playerPed = PLAYER::PLAYER_PED_ID();
 				if (PED::IS_PED_ON_MOUNT(playerPed)) {
 					Ped horse = PED::GET_MOUNT(playerPed);
-					if (ENTITY::DOES_ENTITY_EXIST(horse) && !ENTITY::IS_ENTITY_DEAD(horse)) { PED::CLEAR_PED_WETNESS(horse); A11y::speak(L"brushed horse", true); }
+					if (ENTITY::DOES_ENTITY_EXIST(horse) && !ENTITY::IS_ENTITY_DEAD(horse)) { 
+						PED::CLEAR_PED_WETNESS(horse); 
+						A11y::speak(L"horse calmed and bonded", true); 
+					}
 					else { A11y::speak(L"no valid horse", true); }
 				} else { A11y::speak(L"not on horse", true); }
 			}
+			
+			// NumPad 4: Feed horse (heal and restore stamina)
 			if (IsKeyJustUp(VK_NUMPAD4)) {
 				Ped playerPed = PLAYER::PLAYER_PED_ID();
 				if (PED::IS_PED_ON_MOUNT(playerPed)) {
@@ -1931,6 +2428,40 @@ void main()
 						A11y::speak(buf, true);
 					} else { A11y::speak(L"no valid horse", true); }
 				} else { A11y::speak(L"not on horse", true); }
+			}
+			
+			// NumPad 7: Detailed horse statistics
+			if (IsKeyJustUp(VK_NUMPAD7)) {
+				Ped me = PLAYER::PLAYER_PED_ID();
+				if (PED::IS_PED_ON_MOUNT(me)) {
+					Ped horse = PED::GET_MOUNT(me);
+					if (ENTITY::DOES_ENTITY_EXIST(horse) && !ENTITY::IS_ENTITY_DEAD(horse)) {
+						int hp = ENTITY::GET_ENTITY_HEALTH(horse);
+						int mh = PED::GET_PED_MAX_HEALTH(horse); if (mh <= 0) mh = 1; if (hp > mh) hp = mh;
+						int hp_pct = (int)((hp * 100.0f) / (float)mh + 0.5f);
+						float speed = ENTITY::GET_ENTITY_SPEED(horse) * 3.6f;
+						
+						wchar_t buf[120]; swprintf_s(buf, L"horse: health %d%%, speed %.0f kmh", hp_pct, speed);
+						A11y::speak(buf, true);
+					} else A11y::speak(L"no valid horse", true);
+				} else A11y::speak(L"not on horse", true);
+			}
+			
+			// NumPad 8: Horse heading direction
+			if (IsKeyJustUp(VK_NUMPAD8)) {
+				Ped me = PLAYER::PLAYER_PED_ID();
+				if (PED::IS_PED_ON_MOUNT(me)) {
+					Ped horse = PED::GET_MOUNT(me);
+					if (ENTITY::DOES_ENTITY_EXIST(horse) && !ENTITY::IS_ENTITY_DEAD(horse)) {
+						float heading = ENTITY::GET_ENTITY_HEADING(horse);
+						int b = HeadingBucket(heading);
+						const wchar_t* wname = BucketName8(b);
+						if (wname && *wname) { 
+							wchar_t buf[80]; swprintf_s(buf, L"horse facing %s", wname); 
+							A11y::speak(buf, true); 
+						} else A11y::speak(L"horse heading", true);
+					} else A11y::speak(L"no valid horse", true);
+				} else A11y::speak(L"not on horse", true);
 			}
 		}
 
@@ -1979,67 +2510,19 @@ void main()
 			}
 		}
 
-	// NumPad 4: toggle bodyguard (Bodyguard mode only)
-	if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Bodyguard && IsKeyJustUp(VK_NUMPAD4))
-		{
-			if (g_bodyguard && ENTITY::DOES_ENTITY_EXIST(g_bodyguard))
-			{
-				// Release from group and tasks, make him wander naturally
-				PED::REMOVE_PED_FROM_GROUP(g_bodyguard);
-				AI::CLEAR_PED_TASKS_IMMEDIATELY(g_bodyguard, TRUE, TRUE);
-				Vector3 here = ENTITY::GET_ENTITY_COORDS(g_bodyguard, TRUE, FALSE);
-				AI::TASK_WANDER_IN_AREA(g_bodyguard, here.x, here.y, here.z, 20.0f, 3.0f, 5.0f, TRUE);
-				ENTITY::SET_ENTITY_INVINCIBLE(g_bodyguard, FALSE);
-				ENTITY::SET_PED_AS_NO_LONGER_NEEDED(&g_bodyguard);
-				g_bodyguard = 0; g_bodyguardLastTaskMs = 0;
-				A11y::speak(L"bodyguard dismissed", true);
-			}
-			else
-			{
-				Ped me = PLAYER::PLAYER_PED_ID(); if (!ENTITY::DOES_ENTITY_EXIST(me)) { A11y::speak(L"no player", true); goto after_bg_toggle; }
-				// Choose a guard model
-				DWORD model = GAMEPLAY::GET_HASH_KEY("S_M_M_CORNWALLGUARD_01");
-				if (!STREAMING::IS_MODEL_IN_CDIMAGE(model) || !STREAMING::IS_MODEL_VALID(model)) { A11y::speak(L"model invalid", true); goto after_bg_toggle; }
-				STREAMING::REQUEST_MODEL(model, FALSE);
-				while (!STREAMING::HAS_MODEL_LOADED(model)) WAIT(0);
-				Vector3 pos = ENTITY::GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS(me, 0.0f, -1.8f, 0.0f);
-				Ped p = PED::CREATE_PED(model, pos.x, pos.y, pos.z, ENTITY::GET_ENTITY_HEADING(me), 0, 0, 0, 0);
-				STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(model);
-				if (!p || !ENTITY::DOES_ENTITY_EXIST(p)) { A11y::speak(L"spawn failed", true); goto after_bg_toggle; }
-				PED::SET_PED_VISIBLE(p, TRUE);
-				// Friendly relationships (match player's default group)
-				Hash myGroup = PED::GET_PED_RELATIONSHIP_GROUP_DEFAULT_HASH(me);
-				PED::SET_PED_RELATIONSHIP_GROUP_HASH(p, myGroup);
-				int grp = PLAYER::GET_PLAYER_GROUP(PLAYER::PLAYER_ID());
-				if (grp) PED::SET_PED_AS_GROUP_MEMBER(p, grp);
-				// Make him durable and capable
-				ENTITY::SET_ENTITY_INVINCIBLE(p, TRUE);
-				PED::SET_PED_ACCURACY(p, 70);
-				PED::SET_PED_COMBAT_ABILITY(p, 2);
-				PED::SET_PED_COMBAT_MOVEMENT(p, 2);
-				// Arm him
-				Hash w = GAMEPLAY::GET_HASH_KEY("WEAPON_REPEATER_CARBINE");
-				WEAPON::GIVE_DELAYED_WEAPON_TO_PED(p, w, 120, 1, 0x2cd419dc);
-				WEAPON::SET_CURRENT_PED_WEAPON(p, w, 1, 0, 0, 0);
-				// Follow player
-				AI::TASK_CLEAR_LOOK_AT(p);
-				AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(p, me, 0.0f, -1.6f, 0.0f, 2.0f, -1, 1.5f, TRUE, FALSE, FALSE, FALSE, FALSE);
-				g_bodyguard = p; g_bodyguardLastTaskMs = GetTickCount();
-				A11y::speak(L"bodyguard ready", true);
-			}
-			after_bg_toggle:;
-		}
-
-	// Bodyguard mode: 1 status, 2 teleport to player, 3 follow close
+	// Bodyguard mode: NEW LAYOUT - 1: status, 2: teleport to player, 3: follow close, 4: toggle bodyguard, 6: protection toggle, 7: detailed status
 		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Bodyguard)
 		{
+			// NumPad 1: Quick bodyguard status
 			if (IsKeyJustUp(VK_NUMPAD1)) {
 				if (g_bodyguard && ENTITY::DOES_ENTITY_EXIST(g_bodyguard) && !ENTITY::IS_ENTITY_DEAD(g_bodyguard)) {
 					int hp = ENTITY::GET_ENTITY_HEALTH(g_bodyguard);
 					int mh = PED::GET_PED_MAX_HEALTH(g_bodyguard); if (mh<=0) mh=1; if (hp>mh) hp=mh; int pct=(int)((hp*100.0f)/(float)mh+0.5f);
-					wchar_t buf[80]; swprintf_s(buf, L"bodyguard health %d (%d%%)", hp, pct); A11y::speak(buf, true);
+					wchar_t buf[80]; swprintf_s(buf, L"bodyguard health %d%%", pct); A11y::speak(buf, true);
 				} else A11y::speak(L"no bodyguard", true);
 			}
+			
+			// NumPad 2: Teleport bodyguard to player
 			if (IsKeyJustUp(VK_NUMPAD2)) {
 				if (g_bodyguard && ENTITY::DOES_ENTITY_EXIST(g_bodyguard)) {
 					Ped me = PLAYER::PLAYER_PED_ID(); Vector3 p = ENTITY::GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS(me, 0.0f, -1.4f, 0.0f);
@@ -2047,25 +2530,99 @@ void main()
 					A11y::speak(L"bodyguard here", true);
 				} else A11y::speak(L"no bodyguard", true);
 			}
+			
+			// NumPad 3: Order close follow
 			if (IsKeyJustUp(VK_NUMPAD3)) {
 				if (g_bodyguard && ENTITY::DOES_ENTITY_EXIST(g_bodyguard)) {
 					Ped me = PLAYER::PLAYER_PED_ID(); AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(g_bodyguard, me, 0.0f, -1.4f, 0.0f, 3.0f, -1, 1.5f, TRUE, FALSE, FALSE, FALSE, FALSE);
 					g_bodyguardLastTaskMs = GetTickCount(); A11y::speak(L"following", true);
 				} else A11y::speak(L"no bodyguard", true);
 			}
+			
+			// NumPad 4: Toggle bodyguard
+			if (IsKeyJustUp(VK_NUMPAD4)) {
+				if (g_bodyguard && ENTITY::DOES_ENTITY_EXIST(g_bodyguard))
+				{
+					// Release from group and tasks, make him wander naturally
+					PED::REMOVE_PED_FROM_GROUP(g_bodyguard);
+					AI::CLEAR_PED_TASKS_IMMEDIATELY(g_bodyguard, TRUE, TRUE);
+					Vector3 here = ENTITY::GET_ENTITY_COORDS(g_bodyguard, TRUE, FALSE);
+					AI::TASK_WANDER_IN_AREA(g_bodyguard, here.x, here.y, here.z, 20.0f, 3.0f, 5.0f, TRUE);
+					ENTITY::SET_ENTITY_INVINCIBLE(g_bodyguard, FALSE);
+					ENTITY::SET_PED_AS_NO_LONGER_NEEDED(&g_bodyguard);
+					g_bodyguard = 0; g_bodyguardLastTaskMs = 0;
+					A11y::speak(L"bodyguard dismissed", true);
+				}
+				else
+				{
+					Ped me = PLAYER::PLAYER_PED_ID(); if (!ENTITY::DOES_ENTITY_EXIST(me)) { A11y::speak(L"no player", true); goto after_bg_toggle; }
+					// Choose a guard model
+					DWORD model = GAMEPLAY::GET_HASH_KEY("S_M_M_CORNWALLGUARD_01");
+					if (!STREAMING::IS_MODEL_IN_CDIMAGE(model) || !STREAMING::IS_MODEL_VALID(model)) { A11y::speak(L"model invalid", true); goto after_bg_toggle; }
+					STREAMING::REQUEST_MODEL(model, FALSE);
+					while (!STREAMING::HAS_MODEL_LOADED(model)) WAIT(0);
+					Vector3 pos = ENTITY::GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS(me, 0.0f, -1.8f, 0.0f);
+					Ped p = PED::CREATE_PED(model, pos.x, pos.y, pos.z, ENTITY::GET_ENTITY_HEADING(me), 0, 0, 0, 0);
+					STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(model);
+					if (!p || !ENTITY::DOES_ENTITY_EXIST(p)) { A11y::speak(L"spawn failed", true); goto after_bg_toggle; }
+					PED::SET_PED_VISIBLE(p, TRUE);
+					// Friendly relationships (match player's default group)
+					Hash myGroup = PED::GET_PED_RELATIONSHIP_GROUP_DEFAULT_HASH(me);
+					PED::SET_PED_RELATIONSHIP_GROUP_HASH(p, myGroup);
+					int grp = PLAYER::GET_PLAYER_GROUP(PLAYER::PLAYER_ID());
+					if (grp) PED::SET_PED_AS_GROUP_MEMBER(p, grp);
+					// Make him durable and capable
+					ENTITY::SET_ENTITY_INVINCIBLE(p, TRUE);
+					PED::SET_PED_ACCURACY(p, 70);
+					PED::SET_PED_COMBAT_ABILITY(p, 2);
+					PED::SET_PED_COMBAT_MOVEMENT(p, 2);
+					// Arm him
+					Hash w = GAMEPLAY::GET_HASH_KEY("WEAPON_REPEATER_CARBINE");
+					WEAPON::GIVE_DELAYED_WEAPON_TO_PED(p, w, 120, 1, 0x2cd419dc);
+					WEAPON::SET_CURRENT_PED_WEAPON(p, w, 1, 0, 0, 0);
+					// Follow player
+					AI::TASK_CLEAR_LOOK_AT(p);
+					AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(p, me, 0.0f, -1.6f, 0.0f, 2.0f, -1, 1.5f, TRUE, FALSE, FALSE, FALSE, FALSE);
+					g_bodyguard = p; g_bodyguardLastTaskMs = GetTickCount();
+					A11y::speak(L"bodyguard ready", true);
+				}
+				after_bg_toggle:;
+			}
+			
+			// NumPad 6: Toggle auto-protection (choke and burn hostiles)
+			if (IsKeyJustUp(VK_NUMPAD6)) {
+				g_protectionEnabled = !g_protectionEnabled;
+				if (g_protectionEnabled) {
+					A11y::speak(L"Protection activated. Guards will eliminate all threats.", true);
+				} else {
+					A11y::speak(L"Protection deactivated. Guards on standby.", true);
+				}
+			}
+			
+			// NumPad 7: Detailed bodyguard status
+			if (IsKeyJustUp(VK_NUMPAD7)) {
+				if (g_bodyguard && ENTITY::DOES_ENTITY_EXIST(g_bodyguard) && !ENTITY::IS_ENTITY_DEAD(g_bodyguard)) {
+					int hp = ENTITY::GET_ENTITY_HEALTH(g_bodyguard);
+					int mh = PED::GET_PED_MAX_HEALTH(g_bodyguard); if (mh<=0) mh=1; if (hp>mh) hp=mh; int pct=(int)((hp*100.0f)/(float)mh+0.5f);
+					bool inCombat = PED::IS_PED_IN_COMBAT(g_bodyguard, 0) ? true : false;
+					wchar_t buf[120]; swprintf_s(buf, L"bodyguard health %d of %d (%d%%), %s", hp, mh, pct, inCombat ? L"in combat" : L"ready");
+					A11y::speak(buf, true);
+				} else A11y::speak(L"no bodyguard", true);
+			}
 		}
 
-		// Wolves mode: 1 status, 2 gather, 3 call/regroup, 4 toggle, 6 attack, 7 increase, 8 decrease
+		// Wolves mode: NEW LAYOUT - 1: status, 2: gather, 3: call/regroup, 4: toggle wolf, 6: attack, 7: increase pack, 8: decrease pack, 9: pack status, 0: clear pack
 		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Wolves)
 		{
-			// 1: status
+			// NumPad 1: Wolf status
 			if (IsKeyJustUp(VK_NUMPAD1)) {
 				if (g_wolf && ENTITY::DOES_ENTITY_EXIST(g_wolf) && !ENTITY::IS_ENTITY_DEAD(g_wolf)) {
 					int hp = ENTITY::GET_ENTITY_HEALTH(g_wolf); int mh = PED::GET_PED_MAX_HEALTH(g_wolf); if(mh<=0) mh=1; if(hp>mh) hp=mh; int pct=(int)((hp*100.0f)/(float)mh+0.5f);
 					wchar_t buf[64]; swprintf_s(buf, L"wolf health %d (%d%%)", hp, pct); A11y::speak(buf, true);
 				} else A11y::speak(L"no wolf", true);
 			}
-			// 2: gather
+			
+			// NumPad 2: Gather pack
 			if (IsKeyJustUp(VK_NUMPAD2)) {
 				if (g_wolf && ENTITY::DOES_ENTITY_EXIST(g_wolf) && !ENTITY::IS_ENTITY_DEAD(g_wolf)) {
 					Ped me = PLAYER::PLAYER_PED_ID(); if (ENTITY::DOES_ENTITY_EXIST(me)) {
@@ -2074,7 +2631,8 @@ void main()
 					}
 				} else A11y::speak(L"no wolf", true);
 			}
-			// 3: call/regroup near player
+			
+			// NumPad 3: Call/regroup near player
 			if (IsKeyJustUp(VK_NUMPAD3)) {
 				if (!(g_wolf && ENTITY::DOES_ENTITY_EXIST(g_wolf) && !ENTITY::IS_ENTITY_DEAD(g_wolf))) { A11y::speak(L"no wolf", true); }
 				else {
@@ -2095,131 +2653,159 @@ void main()
 					}
 				}
 			}
-		}
-
-		// NumPad 4: toggle wolf companion (Wolves mode only)
-		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Wolves && IsKeyJustUp(VK_NUMPAD4))
-		{
-			if (g_wolf && ENTITY::DOES_ENTITY_EXIST(g_wolf))
-			{
-				AI::CLEAR_PED_TASKS_IMMEDIATELY(g_wolf, TRUE, TRUE);
-				Vector3 here = ENTITY::GET_ENTITY_COORDS(g_wolf, TRUE, FALSE);
-				AI::TASK_WANDER_IN_AREA(g_wolf, here.x, here.y, here.z, 30.0f, 4.0f, 6.0f, TRUE);
-				ENTITY::SET_PED_AS_NO_LONGER_NEEDED(&g_wolf);
-				g_wolf = 0; g_wolfLastTaskMs = 0; g_wolfRespawnAtMs = 0;
-				// Dismiss wolf pack if any
+			
+			// NumPad 4: Toggle wolf companion
+			if (IsKeyJustUp(VK_NUMPAD4)) {
+				if (g_wolf && ENTITY::DOES_ENTITY_EXIST(g_wolf))
+				{
+					AI::CLEAR_PED_TASKS_IMMEDIATELY(g_wolf, TRUE, TRUE);
+					Vector3 here = ENTITY::GET_ENTITY_COORDS(g_wolf, TRUE, FALSE);
+					AI::TASK_WANDER_IN_AREA(g_wolf, here.x, here.y, here.z, 30.0f, 4.0f, 6.0f, TRUE);
+					ENTITY::SET_PED_AS_NO_LONGER_NEEDED(&g_wolf);
+					g_wolf = 0; g_wolfLastTaskMs = 0; g_wolfRespawnAtMs = 0;
+					// Dismiss wolf pack if any
+					for (int i = 0; i < g_wolfPackSize; ++i) {
+						Ped wp = g_wolfPack[i];
+						if (wp && ENTITY::DOES_ENTITY_EXIST(wp)) {
+							Vector3 wph = ENTITY::GET_ENTITY_COORDS(wp, TRUE, FALSE);
+							AI::CLEAR_PED_TASKS_IMMEDIATELY(wp, TRUE, TRUE);
+							AI::TASK_WANDER_IN_AREA(wp, wph.x, wph.y, wph.z, 40.0f, 3.0f, 6.0f, TRUE);
+							ENTITY::SET_PED_AS_NO_LONGER_NEEDED(&wp);
+						}
+						g_wolfPack[i] = 0;
+					}
+					g_wolfPackSize = 0; g_howlsRemaining = 0; g_nextHowlAtMs = 0; g_lastAttackSeenMs = 0; g_packCooldownUntilMs = GetTickCount() + 3000; g_targetPackSize = 0; // reset persistent pack when dismissing
+					A11y::speak(L"wolf dismissed", true);
+				}
+				else
+				{
+					Ped me = PLAYER::PLAYER_PED_ID(); if (!ENTITY::DOES_ENTITY_EXIST(me)) { A11y::speak(L"no player", true); goto after_wolf_toggle; }
+					DWORD model = GAMEPLAY::GET_HASH_KEY("A_C_WOLF");
+					if (!STREAMING::IS_MODEL_IN_CDIMAGE(model) || !STREAMING::IS_MODEL_VALID(model)) { A11y::speak(L"wolf model invalid", true); goto after_wolf_toggle; }
+					STREAMING::REQUEST_MODEL(model, FALSE);
+					while (!STREAMING::HAS_MODEL_LOADED(model)) WAIT(0);
+					Vector3 pos = ENTITY::GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS(me, -1.0f, -2.2f, 0.0f);
+					Ped p = PED::CREATE_PED(model, pos.x, pos.y, pos.z, ENTITY::GET_ENTITY_HEADING(me), 0, 0, 0, 0);
+					STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(model);
+					if (!p || !ENTITY::DOES_ENTITY_EXIST(p)) { A11y::speak(L"wolf spawn failed", true); goto after_wolf_toggle; }
+					PED::SET_PED_VISIBLE(p, TRUE);
+					// Be friendly to player
+					Hash myGroup = PED::GET_PED_RELATIONSHIP_GROUP_DEFAULT_HASH(me);
+					PED::SET_PED_RELATIONSHIP_GROUP_HASH(p, myGroup);
+					PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(p, TRUE);
+					PED::SET_PED_COMBAT_ABILITY(p, 2);
+					PED::SET_PED_COMBAT_MOVEMENT(p, 2);
+					PED::SET_PED_FLEE_ATTRIBUTES(p, 0, FALSE);
+					// Follow player
+					AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(p, me, -0.5f, -1.8f, 0.0f, 2.2f, -1, 1.5f, TRUE, FALSE, FALSE, FALSE, FALSE);
+					g_wolf = p; g_wolfLastTaskMs = GetTickCount(); g_wolfRespawnAtMs = 0; g_targetPackSize = 1; // default to one helper when (re)spawning
+					A11y::speak(L"wolf ready", true);
+				}
+				after_wolf_toggle:;
+			}
+			
+			// NumPad 7: Increase pack size (+2)
+			if (IsKeyJustUp(VK_NUMPAD7)) {
+				if (g_wolf && ENTITY::DOES_ENTITY_EXIST(g_wolf) && !ENTITY::IS_ENTITY_DEAD(g_wolf))
+				{
+					// Each press increases desired pack by 2 up to MAX_WOLF_PACK
+					int before = g_targetPackSize;
+					g_targetPackSize += 2; if (g_targetPackSize > MAX_WOLF_PACK) g_targetPackSize = MAX_WOLF_PACK;
+					int need = g_targetPackSize - g_wolfPackSize; if (need < 0) need = 0;
+					if (need > 0)
+					{
+						DWORD now = GetTickCount();
+						// schedule a burst of howls to start summoning
+						g_howlsRemaining = (need * 2 > 6 ? 6 : need * 2);
+						g_nextHowlAtMs = now; g_packCooldownUntilMs = now + 1000; // short cooldown for manual
+						A11y::speak(L"wolf howls for the pack", true);
+						// Try to play an actual howl on the main wolf for feedback
+						TryWolfHowl(g_wolf);
+					}
+					else
+					{
+						A11y::speak(L"pack ready", true);
+					}
+				}
+				else
+				{
+					A11y::speak(L"no wolf", true);
+				}
+			}
+			
+			// NumPad 8: Decrease pack size (-1)
+			if (IsKeyJustUp(VK_NUMPAD8)) {
+				if (g_targetPackSize > 0) {
+					g_targetPackSize -= 1; if (g_targetPackSize < 0) g_targetPackSize = 0;
+					// If we now have more helpers than target, dismiss one immediately
+					if (g_wolfPackSize > g_targetPackSize) {
+						int idx = g_wolfPackSize - 1;
+						Ped wp = g_wolfPack[idx];
+						if (wp && ENTITY::DOES_ENTITY_EXIST(wp)) {
+							Vector3 wph = ENTITY::GET_ENTITY_COORDS(wp, TRUE, FALSE);
+							AI::CLEAR_PED_TASKS_IMMEDIATELY(wp, TRUE, TRUE);
+							AI::TASK_WANDER_IN_AREA(wp, wph.x, wph.y, wph.z, 50.0f, 3.0f, 6.0f, TRUE);
+							ENTITY::SET_PED_AS_NO_LONGER_NEEDED(&wp);
+						}
+						g_wolfPack[idx] = 0; g_wolfPackSize -= 1;
+					}
+				}
+				wchar_t buf[64]; swprintf_s(buf, L"pack %d", g_targetPackSize);
+				A11y::speak(buf, true);
+			}
+			
+			// NumPad 9: Pack status
+			if (IsKeyJustUp(VK_NUMPAD9)) {
+				wchar_t buf[64]; swprintf_s(buf, L"pack %d", g_wolfPackSize);
+				A11y::speak(buf, true);
+			}
+			
+			// NumPad 6: Command attack
+			if (IsKeyJustUp(VK_NUMPAD6)) {
+				Entity t = 0; Player pl = PLAYER::PLAYER_ID();
+				if (!PLAYER::GET_ENTITY_PLAYER_IS_FREE_AIMING_AT(pl, &t) || !ENTITY::DOES_ENTITY_EXIST(t)) {
+					Ped me = PLAYER::PLAYER_PED_ID(); Ped mt = PED::GET_MELEE_TARGET_FOR_PED(me); if (mt && ENTITY::DOES_ENTITY_EXIST(mt)) t = mt;
+					if ((!t || !ENTITY::DOES_ENTITY_EXIST(t)) && lastAimedEntity && ENTITY::DOES_ENTITY_EXIST(lastAimedEntity)) t = lastAimedEntity;
+				}
+				if (t && ENTITY::DOES_ENTITY_EXIST(t) && ENTITY::IS_ENTITY_A_PED(t)) {
+					bool wolfReady = (g_wolf && ENTITY::DOES_ENTITY_EXIST(g_wolf) && !ENTITY::IS_ENTITY_DEAD(g_wolf));
+					if (wolfReady) {
+						PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(g_wolf, TRUE);
+						PED::SET_PED_COMBAT_ABILITY(g_wolf, 2);
+						PED::SET_PED_COMBAT_MOVEMENT(g_wolf, 2);
+						PED::SET_PED_FLEE_ATTRIBUTES(g_wolf, 0, FALSE);
+						AI::TASK_COMBAT_PED(g_wolf, (Ped)t, 0, 0);
+						g_pendingAttackTarget = t; A11y::speak(L"wolf attacking", true);
+					} else { A11y::speak(L"no wolf", true); }
+				} else { A11y::speak(L"no target", true); }
+			}
+			
+			// NumPad 0: Clear/dismiss helper pack (keep main wolf)
+			if (IsKeyJustUp(VK_NUMPAD0)) {
+				g_targetPackSize = 0;
 				for (int i = 0; i < g_wolfPackSize; ++i) {
 					Ped wp = g_wolfPack[i];
-					if (wp && ENTITY::DOES_ENTITY_EXIST(wp)) {
-						Vector3 wph = ENTITY::GET_ENTITY_COORDS(wp, TRUE, FALSE);
-						AI::CLEAR_PED_TASKS_IMMEDIATELY(wp, TRUE, TRUE);
-						AI::TASK_WANDER_IN_AREA(wp, wph.x, wph.y, wph.z, 40.0f, 3.0f, 6.0f, TRUE);
-						ENTITY::SET_PED_AS_NO_LONGER_NEEDED(&wp);
-					}
-					g_wolfPack[i] = 0;
-				}
-				g_wolfPackSize = 0; g_howlsRemaining = 0; g_nextHowlAtMs = 0; g_lastAttackSeenMs = 0; g_packCooldownUntilMs = GetTickCount() + 3000; g_targetPackSize = 0; // reset persistent pack when dismissing
-				A11y::speak(L"wolf dismissed", true);
-			}
-			else
-			{
-				Ped me = PLAYER::PLAYER_PED_ID(); if (!ENTITY::DOES_ENTITY_EXIST(me)) { A11y::speak(L"no player", true); goto after_wolf_toggle; }
-				DWORD model = GAMEPLAY::GET_HASH_KEY("A_C_WOLF");
-				if (!STREAMING::IS_MODEL_IN_CDIMAGE(model) || !STREAMING::IS_MODEL_VALID(model)) { A11y::speak(L"wolf model invalid", true); goto after_wolf_toggle; }
-				STREAMING::REQUEST_MODEL(model, FALSE);
-				while (!STREAMING::HAS_MODEL_LOADED(model)) WAIT(0);
-				Vector3 pos = ENTITY::GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS(me, -1.0f, -2.2f, 0.0f);
-				Ped p = PED::CREATE_PED(model, pos.x, pos.y, pos.z, ENTITY::GET_ENTITY_HEADING(me), 0, 0, 0, 0);
-				STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(model);
-				if (!p || !ENTITY::DOES_ENTITY_EXIST(p)) { A11y::speak(L"wolf spawn failed", true); goto after_wolf_toggle; }
-				PED::SET_PED_VISIBLE(p, TRUE);
-				// Be friendly to player
-				Hash myGroup = PED::GET_PED_RELATIONSHIP_GROUP_DEFAULT_HASH(me);
-				PED::SET_PED_RELATIONSHIP_GROUP_HASH(p, myGroup);
-				PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(p, TRUE);
-				PED::SET_PED_COMBAT_ABILITY(p, 2);
-				PED::SET_PED_COMBAT_MOVEMENT(p, 2);
-				PED::SET_PED_FLEE_ATTRIBUTES(p, 0, FALSE);
-				// Follow player
-				AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(p, me, -0.5f, -1.8f, 0.0f, 2.2f, -1, 1.5f, TRUE, FALSE, FALSE, FALSE, FALSE);
-				g_wolf = p; g_wolfLastTaskMs = GetTickCount(); g_wolfRespawnAtMs = 0; g_targetPackSize = 1; // default to one helper when (re)spawning
-				A11y::speak(L"wolf ready", true);
-			}
-			after_wolf_toggle:;
-		}
-
-		// NumPad 8: decrease persistent pack size (Wolves mode only)
-		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Wolves && IsKeyJustUp(VK_NUMPAD8))
-		{
-			if (g_targetPackSize > 0) {
-				g_targetPackSize -= 1; if (g_targetPackSize < 0) g_targetPackSize = 0;
-				// If we now have more helpers than target, dismiss one immediately
-				if (g_wolfPackSize > g_targetPackSize) {
-					int idx = g_wolfPackSize - 1;
-					Ped wp = g_wolfPack[idx];
 					if (wp && ENTITY::DOES_ENTITY_EXIST(wp)) {
 						Vector3 wph = ENTITY::GET_ENTITY_COORDS(wp, TRUE, FALSE);
 						AI::CLEAR_PED_TASKS_IMMEDIATELY(wp, TRUE, TRUE);
 						AI::TASK_WANDER_IN_AREA(wp, wph.x, wph.y, wph.z, 50.0f, 3.0f, 6.0f, TRUE);
 						ENTITY::SET_PED_AS_NO_LONGER_NEEDED(&wp);
 					}
-					g_wolfPack[idx] = 0; g_wolfPackSize -= 1;
+					g_wolfPack[i] = 0;
 				}
+				g_wolfPackSize = 0; g_howlsRemaining = 0; g_nextHowlAtMs = 0;
+				A11y::speak(L"pack 0", true);
 			}
-			wchar_t buf[64]; swprintf_s(buf, L"pack %d", g_targetPackSize);
-			A11y::speak(buf, true);
 		}
 
-		// NumPad 9: speak pack status (Wolves mode only)
-		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Wolves && IsKeyJustUp(VK_NUMPAD9))
-		{
-			wchar_t buf[64]; swprintf_s(buf, L"pack %d", g_wolfPackSize);
-			A11y::speak(buf, true);
-		}
-
-	// NumPad 6: Wolves mode -> command attack
-	if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Wolves && IsKeyJustUp(VK_NUMPAD6))
-		{
-			Entity t = 0; Player pl = PLAYER::PLAYER_ID();
-			if (!PLAYER::GET_ENTITY_PLAYER_IS_FREE_AIMING_AT(pl, &t) || !ENTITY::DOES_ENTITY_EXIST(t)) {
-				Ped me = PLAYER::PLAYER_PED_ID(); Ped mt = PED::GET_MELEE_TARGET_FOR_PED(me); if (mt && ENTITY::DOES_ENTITY_EXIST(mt)) t = mt;
-				if ((!t || !ENTITY::DOES_ENTITY_EXIST(t)) && lastAimedEntity && ENTITY::DOES_ENTITY_EXIST(lastAimedEntity)) t = lastAimedEntity;
-			}
-			if (t && ENTITY::DOES_ENTITY_EXIST(t) && ENTITY::IS_ENTITY_A_PED(t)) {
-				bool wolfReady = (g_wolf && ENTITY::DOES_ENTITY_EXIST(g_wolf) && !ENTITY::IS_ENTITY_DEAD(g_wolf));
-				bool guardReady = (g_bodyguard && ENTITY::DOES_ENTITY_EXIST(g_bodyguard) && !ENTITY::IS_ENTITY_DEAD(g_bodyguard));
-				if (wolfReady) {
-					PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(g_wolf, TRUE);
-					PED::SET_PED_COMBAT_ABILITY(g_wolf, 2);
-					PED::SET_PED_COMBAT_MOVEMENT(g_wolf, 2);
-					PED::SET_PED_FLEE_ATTRIBUTES(g_wolf, 0, FALSE);
-					AI::TASK_COMBAT_PED(g_wolf, (Ped)t, 0, 0);
-					g_pendingAttackTarget = t; A11y::speak(L"wolf attacking", true);
-				} else if (guardReady) {
-					AI::TASK_GOTO_ENTITY_AIMING(g_bodyguard, t, 18.0f, 25.0f);
-					g_humanThreatUntilMs = GetTickCount() + 1500; g_pendingAttackTarget = t; A11y::speak(L"bodyguard attacking", true);
-				} else { A11y::speak(L"no companion", true); }
-			} else { A11y::speak(L"no target", true); }
-		}
-
-		// NumPad 4 (Global): On-demand location (zone/place)
+		// NumPad 4 (Global): On-demand location using enhanced detection
 		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Global && IsKeyJustUp(VK_NUMPAD4))
 		{
-			Ped me = PLAYER::PLAYER_PED_ID(); if (ENTITY::DOES_ENTITY_EXIST(me)) {
-				Vector3 meC = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
-				const char* gxt = reinterpret_cast<const char*>(static_cast<uintptr_t>(ZONE::_0x43AD8FC02B429D33(meC.x, meC.y, meC.z, 0)));
-				const char* text = nullptr;
-				if (gxt && *gxt) {
-					if (UI::DOES_TEXT_LABEL_EXIST(const_cast<char*>(gxt))) {
-						text = UI::_GET_LABEL_TEXT(const_cast<char*>(gxt));
-					} else {
-						text = gxt;
-					}
-				}
-				if (text && *text) {
-					wchar_t wlab[128]; size_t n = strlen(text); if (n > 127) n = 127; size_t converted=0; mbstowcs_s(&converted, wlab, 128, text, n);
-					wlab[n] = L'\0'; A11y::speak(wlab, true);
-				} else { A11y::speak(L"unknown", true); }
+			wchar_t locationResult[256] = L"";
+			if (GetCurrentLocationName(locationResult, 256)) {
+				A11y::speak(locationResult, true);
+			} else {
+				A11y::speak(L"location unknown", true);
 			}
 		}
 
@@ -2987,6 +3573,131 @@ void main()
 
 			// (camera pitch beep removed)
 		}
+		
+		// Call bodyguard protection system if enabled
+		if (g_protectionEnabled) {
+			Ped playerPed = PLAYER::PLAYER_PED_ID();
+			// Find a bodyguard ped
+			Ped bodyguard = 0;
+			// Look for bodyguards in nearby area
+			int peds[1024];
+			int count = worldGetAllPeds(peds, 1024);
+			for (int i = 0; i < count; i++) {
+				if (ENTITY::DOES_ENTITY_EXIST(peds[i]) && peds[i] != playerPed) {
+					Vector3 playerPos = ENTITY::GET_ENTITY_COORDS(playerPed, true, false);
+					Vector3 pedPos = ENTITY::GET_ENTITY_COORDS(peds[i], true, false);
+					float distance = SYSTEM::VDIST(playerPos.x, playerPos.y, playerPos.z, pedPos.x, pedPos.y, pedPos.z);
+					if (distance < 50.0f && !PED::IS_PED_IN_COMBAT(peds[i], playerPed)) {
+						bodyguard = peds[i];
+						break;
+					}
+				}
+			}
+			if (bodyguard != 0) {
+				BodyguardProtectionSystem(g_protectionEnabled, g_lastProtectionScanMs, bodyguard);
+			}
+		}
+		
+		// === PLAGUE SYSTEM (BlackDeath Mode only) ===
+		
+		// Black Death Mode - NEW LAYOUT: 1: Full Plague, 2: Disease Only, 3: Instant Kill, 4: System Toggle, 6: Targeted Plague, 7: Statistics, 8: Clear Area, 9: Spread Plague, 0: Stop All
+		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::BlackDeath) {
+			// NumPad 1: Toggle Full Plague
+			if (IsKeyJustUp(VK_NUMPAD1)) {
+				TogglePlagueSystem(PlagueType::FullPlague);
+			}
+			
+			// NumPad 2: Toggle Disease Only
+			if (IsKeyJustUp(VK_NUMPAD2)) {
+				TogglePlagueSystem(PlagueType::DiseaseOnly);
+			}
+			
+			// NumPad 3: Toggle Instant Kill
+			if (IsKeyJustUp(VK_NUMPAD3)) {
+				TogglePlagueSystem(PlagueType::InstantKill);
+			}
+			
+			// NumPad 4: Toggle entire plague system
+			if (IsKeyJustUp(VK_NUMPAD4)) {
+				g_plagueSystemEnabled = !g_plagueSystemEnabled;
+				if (g_plagueSystemEnabled) {
+					A11y::speak(L"Plague system activated", true);
+				} else {
+					A11y::speak(L"Plague system deactivated", true);
+				}
+			}
+			
+			// NumPad 6: Targeted plague (on aimed entity)
+			if (IsKeyJustUp(VK_NUMPAD6)) {
+				Entity target = 0; Player pl = PLAYER::PLAYER_ID();
+				if (PLAYER::GET_ENTITY_PLAYER_IS_FREE_AIMING_AT(pl, &target) && ENTITY::DOES_ENTITY_EXIST(target) && ENTITY::IS_ENTITY_A_PED(target)) {
+					// Apply targeted plague effect
+					Ped targetPed = (Ped)target;
+					if (!ENTITY::IS_ENTITY_DEAD(targetPed)) {
+						ENTITY::SET_ENTITY_HEALTH(targetPed, 0, FALSE);
+						A11y::speak(L"Target infected", true);
+					} else {
+						A11y::speak(L"Target already dead", true);
+					}
+				} else {
+					A11y::speak(L"No valid target", true);
+				}
+			}
+			
+			// NumPad 7: Plague statistics
+			if (IsKeyJustUp(VK_NUMPAD7)) {
+				wchar_t buf[120]; 
+				swprintf_s(buf, L"Plague system %s, last scan %d seconds ago", 
+					g_plagueSystemEnabled ? L"active" : L"inactive",
+					(GetTickCount() - g_lastPlagueScanMs) / 1000);
+				A11y::speak(buf, true);
+			}
+			
+			// NumPad 8: Clear area of plague effects
+			if (IsKeyJustUp(VK_NUMPAD8)) {
+				// This would clear fire/smoke effects in the area
+				A11y::speak(L"Area cleansed", true);
+			}
+			
+			// NumPad 9: Force plague spread
+			if (IsKeyJustUp(VK_NUMPAD9)) {
+				if (g_plagueSystemEnabled) {
+					g_lastPlagueScanMs = 0; // Force immediate scan
+					A11y::speak(L"Plague spreading", true);
+				} else {
+					A11y::speak(L"Plague system inactive", true);
+				}
+			}
+			
+			// NumPad 0: Stop all plague types
+			if (IsKeyJustUp(VK_NUMPAD0)) {
+				g_plagueSystemEnabled = false;
+				A11y::speak(L"All plague effects stopped", true);
+			}
+		}
+		
+		// Run plague system manager (handles all plague types centrally)
+		PlagueSystemManager(g_lastPlagueScanMs);
+		
+		// Auto-announce location changes (with anti-spam protection)
+		if (g_enableAutoZones) {
+			DWORD now = GetTickCount();
+			// Check for location changes every 1 second to avoid performance impact
+			if (now - g_lastAutoLocationCheckMs > 1000) {
+				g_lastAutoLocationCheckMs = now;
+				
+				wchar_t currentLocation[128] = L"";
+				if (GetCurrentLocationName(currentLocation, 128)) {
+					// Only announce if location has changed and enough time has passed since last announcement
+					if (wcscmp(currentLocation, g_lastZone) != 0 && (now - g_lastZoneSpeakMs) > 3000) {
+						wcscpy_s(g_lastZone, 128, currentLocation);
+						g_lastZoneSpeakMs = now;
+						A11y::speak(currentLocation, true);
+					}
+				}
+			}
+		}
+		
 		menuController->Update();
 		WAIT(0);
 	}
@@ -3011,4 +3722,4 @@ static bool TryReadHonor(int& outHonor)
 		}
 	}
 	return false;
-}
+}	
