@@ -156,7 +156,11 @@
 			"group": "build"
 		},
 		{
+<<<<<<< HEAD
 			"label": "Build Plague System Fix",
+=======
+			"label": "Rebuild after zone safety refactor",
+>>>>>>> c5a4ce1d4f87f6c1ac8d406db559871b886cf940
 			"type": "shell",
 			"command": "cmd",
 			"args": [
@@ -164,10 +168,21 @@
 				"/c",
 				"c:\\Users\\hamad\\projects\\rdr2\\rdr2a11y\\build_all.cmd"
 			],
+<<<<<<< HEAD
 			"group": "build"
 		},
 		{
 			"label": "Build Eagle Attack Fix",
+=======
+			"isBackground": false,
+			"problemMatcher": [
+				"$gcc"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Rebuild after location resolver logging",
+>>>>>>> c5a4ce1d4f87f6c1ac8d406db559871b886cf940
 			"type": "shell",
 			"command": "cmd",
 			"args": [
@@ -175,21 +190,20 @@
 				"/c",
 				"c:\\Users\\hamad\\projects\\rdr2\\rdr2a11y\\build_all.cmd"
 			],
+<<<<<<< HEAD
 			"group": "build"
 		},
 		{
 			"label": "Build Eagle Companion System",
-			"type": "shell",
-			"command": "cmd",
-			"args": [
-				"/d",
-				"/c",
-				"c:\\Users\\hamad\\projects\\rdr2\\rdr2a11y\\build_all.cmd"
+=======
+			"problemMatcher": [
+				"$msCompile"
 			],
 			"group": "build"
 		},
 		{
-			"label": "Build Eagle Persistent System",
+			"label": "Build Guard Manager skeleton",
+>>>>>>> c5a4ce1d4f87f6c1ac8d406db559871b886cf940
 			"type": "shell",
 			"command": "cmd",
 			"args": [
@@ -197,6 +211,28 @@
 				"/c",
 				"c:\\Users\\hamad\\projects\\rdr2\\rdr2a11y\\build_all.cmd"
 			],
+<<<<<<< HEAD
+			"group": "build"
+		},
+		{
+			"label": "Build Eagle Persistent System",
+=======
+			"problemMatcher": [
+				"$msCompile"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Rebuild after Guard Manager squads wiring",
+>>>>>>> c5a4ce1d4f87f6c1ac8d406db559871b886cf940
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/d",
+				"/c",
+				"c:\\Users\\hamad\\projects\\rdr2\\rdr2a11y\\build_all.cmd"
+			],
+<<<<<<< HEAD
 			"group": "build"
 		},
 		{
@@ -273,6 +309,10 @@
 				"/d",
 				"/c",
 				"c:\\Users\\hamad\\projects\\rdr2\\rdr2a11y\\build_all.cmd"
+=======
+			"problemMatcher": [
+				"$msCompile"
+>>>>>>> c5a4ce1d4f87f6c1ac8d406db559871b886cf940
 			],
 			"group": "build"
 		}
