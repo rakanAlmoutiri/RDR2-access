@@ -9,6 +9,7 @@ namespace PLAYER
 	static Any _0x5EBE38A20BC51C27(Any p0) { return invoke<Any>(0x5EBE38A20BC51C27, p0); }
 	static void _0x325434C68358D282(BOOL p0) { invoke<Void>(0x325434C68358D282, p0); }
 	static Ped GET_PLAYER_PED_SCRIPT_INDEX(Player player) { return invoke<Ped>(0x5C880F9056D784C8, player); }
+	// Note: IS_SPECIAL_ABILITY_ACTIVE not available in current SDK; use alternative checks
 	static void SET_PLAYER_MODEL(Player player, Hash modelHash, BOOL p2) { invoke<Void>(0xED40380076A31506, player, modelHash, p2); }
 	static BOOL _0x0760D6F70EBCC05C(Any p0) { return invoke<BOOL>(0x0760D6F70EBCC05C, p0); }
 	static int GET_PLAYER_TEAM(Player player) { return invoke<int>(0xB464EB6A40C7975B, player); }
@@ -451,7 +452,7 @@ namespace ENTITY
 	static BOOL IS_ENTITY_A_PED(Entity entity) { return invoke<BOOL>(0xCF8176912DDA4EA5, entity); }
 	static BOOL IS_ENTITY_A_MISSION_ENTITY(Entity entity) { return invoke<BOOL>(0x138190F64DB4BBD1, entity); }
 	static BOOL IS_ENTITY_A_VEHICLE(Entity entity) { return invoke<BOOL>(0xC3D96AF45FCCEC4C, entity); }
-	static BOOL IS_ENTITY_AN_OBJECT(Player* entity) { return invoke<BOOL>(0x0A27A546A375FDEF, entity); }
+	static BOOL IS_ENTITY_AN_OBJECT(Entity entity) { return invoke<BOOL>(0x0A27A546A375FDEF, entity); }
 	static BOOL IS_ENTITY_AT_COORD(Entity entity, float xPos, float yPos, float zPos, float xSize, float ySize, float zSize, BOOL p7, BOOL p8, int p9) { return invoke<BOOL>(0x5E58342602E94718, entity, xPos, yPos, zPos, xSize, ySize, zSize, p7, p8, p9); }
 	static BOOL IS_ENTITY_AT_ENTITY(Entity entity1, Entity entity2, float xSize, float ySize, float zSize, BOOL p5, BOOL p6, int p7) { return invoke<BOOL>(0xC057F02B837A27F6, entity1, entity2, xSize, ySize, zSize, p5, p6, p7); }
 	static BOOL IS_ENTITY_ATTACHED(Entity entity) { return invoke<BOOL>(0xEE6AD63ABF59C0B7, entity); }

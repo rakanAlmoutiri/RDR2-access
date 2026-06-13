@@ -32,16 +32,14 @@ namespace DebugLog {
         return base;
     }
 
-    // User-requested log path: Documents\hmdqr\nativetraner.log
+    // User-requested log path: Documents\nativetraner.log
     inline std::wstring docsLogPath() {
         wchar_t up[MAX_PATH]{};
         DWORD n = GetEnvironmentVariableW(L"USERPROFILE", up, MAX_PATH);
         if (!n || n >= MAX_PATH) return L"";
         std::wstring p(up);
         if (!p.empty() && p.back() != L'\\') p += L"\\";
-        p += L"Documents\\hmdqr";
-        // Ensure folder exists (Documents exists; create hmdqr)
-        CreateDirectoryW(p.c_str(), nullptr);
+        p += L"Documents";
         if (!p.empty() && p.back() != L'\\') p += L"\\";
         else p += L"\\";
         p += L"nativetraner.log"; // spelling per user request

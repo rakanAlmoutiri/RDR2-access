@@ -8,788 +8,18 @@
 #include "scriptmenu.h"
 #include "keyboard.h"
 #include "a11y.h"
+#include "controller.h"
 #include "debuglog.h"
 
 #include <unordered_map>
 #include <vector>
 #include <string>
-#include <algorithm>
 #include <ctime>
 #include <cmath>
-#include <algorithm>
-// GTA11Y-like aiming cues additions
-#include <thread>
-#include <mmsystem.h>
-#pragma comment(lib, "winmm.lib")
-#include <windows.h>
 
 using namespace std;
 
-// Forward declaration for safe zone label resolver
-static bool TryGetZoneLabelAt(const Vector3& pos, std::wstring& outW);
-
 #include "scriptinfo.h"
-
-// Last-known stable player money (in cents) as a fallback when direct reads are unreliable
-int g_lastKnownMoneyCents = -1;
-
-// Forward declaration (defined at bottom)
-static bool TryReadHonor(int& outHonor);
-
-// --- GTA11Y-like aiming cues state ---
-static DWORD g_lastAimSoundMs = 0;
-static Entity g_lastAimSoundEntity = 0;
-static bool g_enableAimingWavCues = true;     // can be wired to a menu later
-// (removed) camera pitch beep feature per user request
-static DWORD g_lastHeadCueMs = 0;
-static Entity g_lastHeadEntity = 0;
-
-// Money announcement timing (debounce + min interval)
-// Previously: stable=800ms, minInterval=500ms. Now faster by default.
-static int g_moneyStableMs = 50;       // debounce required for value to be considered stable
-static int g_moneyMinIntervalMs = 50;  // minimum gap between consecutive money announcements
-
-// Navigation/heading announcements
-static bool g_enableAutoZones = true;           // auto announce known/zone names
-static bool g_enableAutoHeading = false;        // auto announce cardinal directions
-static DWORD g_lastHeadingSpeakMs = 0;          // throttle heading speech
-static int g_lastHeadingBucket = -1;            // last 8-way bucket announced
-static wchar_t g_lastZone[128] = {0};           // last zone label announced
-static DWORD g_lastZoneSpeakMs = 0;
-static DWORD g_lastAutoLocationCheckMs = 0;     // throttle auto location checks
-
-// Inventory monitoring system
-struct InventoryState {
-	int money = 0;
-	int health = 0;
-	int maxHealth = 0;
-	// Add more fields as needed for cores, items, etc.
-};
-static InventoryState g_lastInventory = {};
-static DWORD g_lastInventoryCheckMs = 0;
-static bool g_enableInventoryMonitoring = true;
-
-// Ground items scanning system
-struct GroundItem {
-	Vector3 position;
-	float distance;
-	std::wstring name;
-	std::wstring category;
-};
-static std::vector<GroundItem> g_nearbyGroundItems;
-static DWORD g_lastGroundItemScanMs = 0;
-static bool g_enableGroundItemScanning = true;
-
-// Item pickup detection system
-static std::vector<Hash> g_lastNearbyPickups;
-static DWORD g_lastPickupCheckMs = 0;
-static bool g_enablePickupAnnouncements = true;
-
-// Enhanced location detection function
-static bool GetCurrentLocationName(wchar_t* locationResult, size_t bufferSize) {
-	Ped me = PLAYER::PLAYER_PED_ID();
-	if (!ENTITY::DOES_ENTITY_EXIST(me)) return false;
-
-	Vector3 meC = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
-	bool locationFound = false;
-
-	// Method 1: Try the original approach
-	const char* gxt = reinterpret_cast<const char*>(static_cast<uintptr_t>(ZONE::_0x43AD8FC02B429D33(meC.x, meC.y, meC.z, 0)));
-	if (gxt && *gxt) {
-		if (UI::DOES_TEXT_LABEL_EXIST(const_cast<char*>(gxt))) {
-			const char* text = UI::_GET_LABEL_TEXT(const_cast<char*>(gxt));
-			if (text && *text) {
-				size_t n = strlen(text); if (n > bufferSize-1) n = bufferSize-1; size_t converted = 0;
-				mbstowcs_s(&converted, locationResult, bufferSize, text, n);
-				locationResult[n] = L'\0';
-				locationFound = true;
-			}
-		}
-	}
-
-	// Method 2: Try alternative ZONE function
-	if (!locationFound) {
-		Any altResult = ZONE::_0x5BA7A68A346A5A91(meC.x, meC.y, meC.z);
-		if (altResult != 0) {
-			swprintf_s(locationResult, bufferSize, L"Zone %d", (int)altResult);
-			locationFound = true;
-		}
-	}
-
-	// Method 3: Try MAPREGION functions
-	if (!locationFound) {
-		Any regionResult = MAPREGION::_0x2B32B11520626229(meC.x, meC.y, meC.z, 100.0f, 0);
-		if (regionResult != 0) {
-			Vector3 regionCoords = MAPREGION::_0xF70F00013A62F866(regionResult);
-			if (regionCoords.x != 0.0f || regionCoords.y != 0.0f) {
-				swprintf_s(locationResult, bufferSize, L"Region %.0f %.0f", regionCoords.x, regionCoords.y);
-				locationFound = true;
-			}
-		}
-	}
-
-	// Method 4: Enhanced coordinate-based location names
-	if (!locationFound) {
-		// Saint Denis area (extended range)
-		if (meC.x >= 2200 && meC.x <= 2800 && meC.y >= -1350 && meC.y <= -950) {
-			wcscpy_s(locationResult, bufferSize, L"Saint Denis");
-			locationFound = true;
-		}
-		// Valentine area
-		else if (meC.x >= -350 && meC.x <= -150 && meC.y >= 600 && meC.y <= 900) {
-			wcscpy_s(locationResult, bufferSize, L"Valentine");
-			locationFound = true;
-		}
-		// Rhodes area
-		else if (meC.x >= 1200 && meC.x <= 1500 && meC.y >= -1350 && meC.y <= -1050) {
-			wcscpy_s(locationResult, bufferSize, L"Rhodes");
-			locationFound = true;
-		}
-		// Strawberry area
-		else if (meC.x >= -1900 && meC.x <= -1600 && meC.y >= -600 && meC.y <= -350) {
-			wcscpy_s(locationResult, bufferSize, L"Strawberry");
-			locationFound = true;
-		}
-		// Blackwater area
-		else if (meC.x >= -900 && meC.x <= -600 && meC.y >= -1350 && meC.y <= -1050) {
-			wcscpy_s(locationResult, bufferSize, L"Blackwater");
-			locationFound = true;
-		}
-		// Annesburg area
-		else if (meC.x >= 2800 && meC.x <= 3100 && meC.y >= 1100 && meC.y <= 1400) {
-			wcscpy_s(locationResult, bufferSize, L"Annesburg");
-			locationFound = true;
-		}
-		// Van Horn Trading Post
-		else if (meC.x >= 2900 && meC.x <= 3200 && meC.y >= 500 && meC.y <= 800) {
-			wcscpy_s(locationResult, bufferSize, L"Van Horn Trading Post");
-			locationFound = true;
-		}
-		// Armadillo
-		else if (meC.x >= -3600 && meC.x <= -3300 && meC.y >= -2700 && meC.y <= -2400) {
-			wcscpy_s(locationResult, bufferSize, L"Armadillo");
-			locationFound = true;
-		}
-		// Tumbleweed
-		else if (meC.x >= -5400 && meC.x <= -5100 && meC.y >= -2900 && meC.y <= -2600) {
-			wcscpy_s(locationResult, bufferSize, L"Tumbleweed");
-			locationFound = true;
-		}
-		// MacFarlane's Ranch
-		else if (meC.x >= -2400 && meC.x <= -2100 && meC.y >= -2200 && meC.y <= -1900) {
-			wcscpy_s(locationResult, bufferSize, L"MacFarlane Ranch");
-			locationFound = true;
-		}
-		// Emerald Ranch
-		else if (meC.x >= 1400 && meC.x <= 1700 && meC.y >= 300 && meC.y <= 600) {
-			wcscpy_s(locationResult, bufferSize, L"Emerald Ranch");
-			locationFound = true;
-		}
-		// Wallace Station
-		else if (meC.x >= -1400 && meC.x <= -1100 && meC.y >= 400 && meC.y <= 700) {
-			wcscpy_s(locationResult, bufferSize, L"Wallace Station");
-			locationFound = true;
-		}
-		// Lagras
-		else if (meC.x >= 2100 && meC.x <= 2400 && meC.y >= -2050 && meC.y <= -1750) {
-			wcscpy_s(locationResult, bufferSize, L"Lagras");
-			locationFound = true;
-		}
-		// General regions based on coordinates
-		else if (meC.x >= 2000 && meC.y >= -1500 && meC.y <= -800) {
-			wcscpy_s(locationResult, bufferSize, L"Lemoyne region");
-			locationFound = true;
-		}
-		else if (meC.x >= -1000 && meC.x <= 1500 && meC.y >= 0) {
-			wcscpy_s(locationResult, bufferSize, L"Heartlands");
-			locationFound = true;
-		}
-		else if (meC.x <= -1500 && meC.y >= -1000) {
-			wcscpy_s(locationResult, bufferSize, L"West Elizabeth");
-			locationFound = true;
-		}
-		else if (meC.x <= -2000 && meC.y <= -1500) {
-			wcscpy_s(locationResult, bufferSize, L"New Austin");
-			locationFound = true;
-		}
-		else if (meC.y >= 1500) {
-			wcscpy_s(locationResult, bufferSize, L"Grizzlies");
-			locationFound = true;
-		}
-	}
-
-	return locationFound;
-}
-
-// Read current player inventory state
-static InventoryState ReadCurrentInventory() {
-	InventoryState current = {};
-	
-	Ped me = PLAYER::PLAYER_PED_ID();
-	if (!ENTITY::DOES_ENTITY_EXIST(me)) {
-		return current;
-	}
-	
-	// Money
-	current.money = ReadPlayerMoneyCents(me);
-	
-	// Health
-	current.health = ENTITY::GET_ENTITY_HEALTH(me);
-	current.maxHealth = ENTITY::GET_ENTITY_MAX_HEALTH(me, false);
-	
-	// TODO: Add more inventory items here
-	// - Cores (Health Core, Stamina Core, Dead Eye Core)
-	// - Items (Food, Medicine, etc.)
-	// - Weapons and ammo
-	
-	return current;
-}
-
-// Compare inventory states and announce changes
-static void AnnounceInventoryChanges(const InventoryState& old, const InventoryState& current) {
-	wchar_t message[256];
-	
-	// Money changes
-	if (old.money != current.money && old.money > 0) { // Skip first-time initialization
-		int diff = current.money - old.money;
-		if (diff > 0) {
-			swprintf_s(message, 256, L"Got $%.2f", diff / 100.0f);
-		} else {
-			swprintf_s(message, 256, L"Spent $%.2f", -diff / 100.0f);
-		}
-		A11y::speak(message, true);
-	}
-	
-	// Health changes
-	if (old.health != current.health && old.health > 0) { // Skip first-time initialization
-		int diff = current.health - old.health;
-		if (diff > 0) {
-			swprintf_s(message, 256, L"Health restored %d points", diff);
-		} else if (diff < 0) {
-			swprintf_s(message, 256, L"Health lost %d points", -diff);
-		}
-		A11y::speak(message, true);
-	}
-}
-
-// Ground Items Detection System
-static void ScanForGroundItems() {
-	if (!g_enableGroundItemScanning) return;
-	
-	DWORD now = GetTickCount();
-	if (now - g_lastGroundItemScanMs < 3000) return; // Scan every 3 seconds
-	g_lastGroundItemScanMs = now;
-	
-	g_nearbyGroundItems.clear();
-	
-	Ped me = PLAYER::PLAYER_PED_ID();
-	if (!ENTITY::DOES_ENTITY_EXIST(me)) return;
-	
-	Vector3 myPos = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
-	float scanRadius = 15.0f; // 15 meter radius
-	
-	// Use ITEMSET to collect nearby objects
-	auto itemSet = ITEMSET::CREATE_ITEMSET(1);
-	if (!ITEMSET::IS_ITEMSET_VALID(itemSet)) return;
-	
-	// Scan for nearby pickups using radius check
-	// Common pickup types in RDR2 (these need to be verified through testing)
-	Hash commonPickups[] = {
-		0x6F740C07, // Money pickup (example)
-		0x8A9B1CE5, // Herb pickup (example)  
-		0x5B50D20A, // Item pickup (example)
-	};
-	
-	for (Hash pickupHash : commonPickups) {
-		if (OBJECT::_IS_PICKUP_WITHIN_RADIUS(pickupHash, myPos.x, myPos.y, myPos.z, scanRadius)) {
-			GroundItem item;
-			item.position = myPos; // Will be updated when we find exact position
-			item.distance = 0.0f;
-			item.name = L"Pickup Item";
-			item.category = L"Ground Item";
-			g_nearbyGroundItems.push_back(item);
-		}
-	}
-	
-	// Also check for dead ped loot
-	int nearbyPeds[64];
-	int* sizeAndPeds = nearbyPeds;
-	*sizeAndPeds = 64;
-	int pedCount = PED::GET_PED_NEARBY_PEDS(me, sizeAndPeds, 0, 0);
-	
-	for (int i = 1; i <= pedCount && i < 64; i++) {
-		Ped nearPed = nearbyPeds[i];
-		if (ENTITY::DOES_ENTITY_EXIST(nearPed) && ENTITY::IS_ENTITY_DEAD(nearPed)) {
-			Vector3 pedPos = ENTITY::GET_ENTITY_COORDS(nearPed, FALSE, FALSE);
-			float distance = SYSTEM::VDIST(myPos.x, myPos.y, myPos.z, pedPos.x, pedPos.y, pedPos.z);
-			
-			if (distance <= scanRadius) {
-				GroundItem item;
-				item.position = pedPos;
-				item.distance = distance;
-				item.name = L"Dead body loot";
-				item.category = L"Loot";
-				g_nearbyGroundItems.push_back(item);
-			}
-		}
-	}
-	
-	ITEMSET::DESTROY_ITEMSET(itemSet);
-}
-
-// Announce nearest ground items
-static void AnnounceNearestGroundItems() {
-	ScanForGroundItems(); // Force a fresh scan
-	
-	if (g_nearbyGroundItems.empty()) {
-		A11y::speak(L"No ground items nearby", true);
-		return;
-	}
-	
-	// Sort by distance
-	std::sort(g_nearbyGroundItems.begin(), g_nearbyGroundItems.end(), 
-		[](const GroundItem& a, const GroundItem& b) {
-			return a.distance < b.distance;
-		});
-	
-	wchar_t message[256];
-	if (g_nearbyGroundItems.size() == 1) {
-		GroundItem nearest = g_nearbyGroundItems[0];
-		swprintf_s(message, 256, L"%s, %.1f meters", nearest.name.c_str(), nearest.distance);
-	} else {
-		GroundItem nearest = g_nearbyGroundItems[0];
-		swprintf_s(message, 256, L"%s, %.1f meters. %d total items found", 
-			nearest.name.c_str(), nearest.distance, (int)g_nearbyGroundItems.size());
-	}
-	A11y::speak(message, true);
-}
-
-// Monitor pickup collection (detects when player picks up items)
-static void MonitorPickupCollection() {
-	if (!g_enablePickupAnnouncements) return;
-	
-	DWORD now = GetTickCount();
-	if (now - g_lastPickupCheckMs < 1000) return; // Check every second
-	g_lastPickupCheckMs = now;
-	
-	Ped me = PLAYER::PLAYER_PED_ID();
-	if (!ENTITY::DOES_ENTITY_EXIST(me)) return;
-	
-	Vector3 myPos = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
-	float scanRadius = 5.0f; // Smaller radius for pickup detection
-	
-	// Current nearby pickups
-	std::vector<Hash> currentPickups;
-	
-	// Common pickup hashes to monitor
-	Hash pickupHashes[] = {
-		0x6F740C07, // Money (example hash)
-		0x8A9B1CE5, // Herbs (example hash)
-		0x5B50D20A, // Items (example hash)
-		0x2C014CA6, // Weapons (example hash)
-		0x1E9A99F8, // Ammo (example hash)
-	};
-	
-	for (Hash pickupHash : pickupHashes) {
-		if (OBJECT::_IS_PICKUP_WITHIN_RADIUS(pickupHash, myPos.x, myPos.y, myPos.z, scanRadius)) {
-			currentPickups.push_back(pickupHash);
-		}
-	}
-	
-	// Compare with last scan to detect picked up items
-	if (!g_lastNearbyPickups.empty()) {
-		for (Hash lastPickup : g_lastNearbyPickups) {
-			// If this pickup was there before but not now, it was collected
-			bool stillThere = false;
-			for (Hash currentPickup : currentPickups) {
-				if (currentPickup == lastPickup) {
-					stillThere = true;
-					break;
-				}
-			}
-			
-			if (!stillThere) {
-				// Item was picked up! Announce it
-				wchar_t message[128];
-				
-				// Try to identify the item type
-				if (lastPickup == 0x6F740C07) {
-					wcscpy_s(message, 128, L"Picked up money");
-				}
-				else if (lastPickup == 0x8A9B1CE5) {
-					wcscpy_s(message, 128, L"Picked up herb");
-				}
-				else if (lastPickup == 0x2C014CA6) {
-					wcscpy_s(message, 128, L"Picked up weapon");
-				}
-				else if (lastPickup == 0x1E9A99F8) {
-					wcscpy_s(message, 128, L"Picked up ammunition");
-				}
-				else {
-					wcscpy_s(message, 128, L"Picked up item");
-				}
-				
-				A11y::speak(message, true);
-			}
-		}
-	}
-	
-	g_lastNearbyPickups = currentPickups;
-}
-
-// A11y hotkey modes (cycled by NumPad 5)
-enum class A11yMode { 
-	Global = 0, 
-	Horse = 1, 
-	Wolves = 2, 
-	Bodyguard = 3, 
-	BlackDeath = 4     // Black Death comprehensive mode
-};
-static A11yMode g_a11yMode = A11yMode::Global;
-
-// Plague system states (within BlackDeath mode)
-enum class PlagueType {
-	FullPlague = 0,      // Full plague: cough then death
-	DiseaseOnly = 1,     // Disease only: cough without death
-	InstantKill = 2      // Instant kill mode
-};
-static PlagueType g_plagueType = PlagueType::FullPlague;
-static bool g_plagueSystemEnabled = false;
-static DWORD g_lastPlagueScanMs = 0;
-
-static inline const wchar_t* ModeName(A11yMode m) {
-	switch (m) {
-	case A11yMode::Global: return L"global";
-	case A11yMode::Horse: return L"horse";
-	case A11yMode::Wolves: return L"wolves";
-	case A11yMode::Bodyguard: return L"bodyguard";
-	case A11yMode::BlackDeath: return L"black death";
-	default: return L"";
-	}
-}
-
-static inline const wchar_t* PlagueTypeName(PlagueType p) {
-	switch (p) {
-	case PlagueType::FullPlague: return L"full plague";
-	case PlagueType::DiseaseOnly: return L"disease only";
-	case PlagueType::InstantKill: return L"instant kill";
-	default: return L"";
-	}
-}
-
-// --- Minimal Guard/Squad data structures (placed early for visibility) ---
-// Track each guard plus their assigned horse (if any)
-struct GuardInfo { Ped ped{0}; Ped horse{0}; bool mounted{false}; };
-struct Squad { std::vector<GuardInfo> guards; };
-static std::vector<Squad> g_squads;         // all squads
-static int g_activeSquad = -1;              // current selected squad
-static int g_maxSquads = 4;                 // small default cap
-static int g_defaultSquadSize = 3;          // for announcements only for now
-// Global guard options
-static bool g_guardsInfiniteAmmo = true;    // default ON per user preference
-static bool g_guardsNoReload = true;        // default ON per user preference
-// Riot mode
-static bool g_riotEnabled = false;          // global riot toggle
-static DWORD g_lastRiotTickMs = 0;
-
-// Squad behavior state and patrol settings
-enum class SquadOrder { Patrol = 0, Follow = 1, Hold = 2, GuardHere = 3 };
-static SquadOrder g_activeSquadOrder = SquadOrder::Patrol;
-static bool g_squadPatrolAroundMe = true;
-static DWORD g_lastPatrolTickMs = 0;
-static Vector3 g_guardHerePos{}; // cached guard-here anchor
-// Auto-defense cadence for squads
-static DWORD g_lastGuardDefenseTickMs = 0;
-// Squad formation and maintenance
-enum class GuardFormation { Column = 0, Line = 1, Wedge = 2 };
-static GuardFormation g_activeFormation = GuardFormation::Column;
-static DWORD g_lastFormationTickMs = 0;
-static DWORD g_lastMountEnforceTickMs = 0;
-static DWORD g_lastCrowdControlTickMs = 0;
-
-// Auto-Defense System (Silent Protection)
-static bool g_autoDefenseEnabled = false;   // main toggle for auto-defense
-static float g_autoDefenseRadius = 30.0f;   // 30 meter detection radius
-static DWORD g_lastAutoDefenseScanMs = 0;   // scan throttle (every 500ms)
-static int g_autoDefenseScanInterval = 500; // milliseconds between scans
-
-// Helpers to identify our guards/horses fast
-static inline bool IsOurGuard(Ped p) {
-	if (!p) return false;
-	for (auto &sq : g_squads) for (auto &gi : sq.guards) if (gi.ped == p) return true;
-	return false;
-}
-static inline bool IsOurHorse(Ped p) {
-	if (!p) return false;
-	for (auto &sq : g_squads) for (auto &gi : sq.guards) if (gi.horse == p) return true;
-	return false;
-}
-
-// Compute formation offsets relative to the player for the i-th guard (0-based)
-static inline void GetFormationOffset(int idx, GuardFormation form, bool mounted, float &outX, float &outY) {
-	// Keep generous spacing to avoid crowding the player; further when mounted
-	const float stepBack = mounted ? 4.0f : 2.8f;    // distance backwards between rows
-	const float lateral = mounted ? 2.6f : 1.8f;     // side-to-side spacing
-	switch (form) {
-		case GuardFormation::Column: {
-			outX = 0.0f; outY = - (2.0f + stepBack * (idx + 1));
-			break;
-		}
-		case GuardFormation::Line: {
-			// Centered line behind the player
-			int side = (idx % 2 == 0) ? -1 : 1; int rank = (idx / 2);
-			outX = side * (lateral * (rank + 1));
-			outY = - (3.5f + (mounted ? 2.0f : 1.2f));
-			break;
-		}
-		case GuardFormation::Wedge: default: {
-			// Triangle/wedge behind the player apex
-			int row = 0; int count = 0;
-			// rows of 1, 2, 3, ...
-			while (count + (row + 1) <= idx) { count += (row + 1); ++row; }
-			int posInRow = idx - count; // 0..row
-			float baseBack = 3.5f + row * stepBack;
-			// center the row left/right
-			float startX = - (row * 0.5f) * lateral;
-			outX = startX + posInRow * lateral;
-			outY = - baseBack;
-			break;
-		}
-	}
-}
-
-// Issue a follow task for guard or horse based on mounted state
-static inline void CommandGuardFollowOffset(const GuardInfo &gi, Ped player, float offX, float offY) {
-	if (!gi.ped || !ENTITY::DOES_ENTITY_EXIST(gi.ped)) return;
-	bool isMounted = PED::IS_PED_ON_MOUNT(gi.ped) ? true : false;
-	if (isMounted && gi.horse && ENTITY::DOES_ENTITY_EXIST(gi.horse)) {
-		// Drive the horse; rider will go along. Slower and wider to keep room.
-		AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(gi.horse, player, offX, offY, 0.0f, 2.6f, -1, 1.8f, TRUE, FALSE, FALSE, FALSE, FALSE);
-	} else {
-		AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(gi.ped, player, offX, offY, 0.0f, 2.6f, -1, 1.6f, TRUE, FALSE, FALSE, FALSE, FALSE);
-	}
-}
-
-// Spawn a durable friendly guard near player with a strong weapon
-static Ped SpawnGuardNearPlayer(Hash modelHash, Hash weaponHash, float offX, float offY)
-{
-	Ped me = PLAYER::PLAYER_PED_ID(); if (!ENTITY::DOES_ENTITY_EXIST(me)) return 0;
-	if (!STREAMING::IS_MODEL_IN_CDIMAGE(modelHash) || !STREAMING::IS_MODEL_VALID(modelHash)) return 0;
-	STREAMING::REQUEST_MODEL(modelHash, FALSE);
-	int waits = 0; while (!STREAMING::HAS_MODEL_LOADED(modelHash) && waits < 200) { WAIT(0); ++waits; }
-	// Add small randomization to the spawn offset; occasionally spawn farther so they run to you
-	float jitterX = ((GAMEPLAY::GET_RANDOM_INT_IN_RANGE(-100, 101)) / 100.0f) * 0.7f; // ~ +/-0.7m
-	float jitterY = ((GAMEPLAY::GET_RANDOM_INT_IN_RANGE(-100, 101)) / 100.0f) * 0.7f;
-	bool farSpawn = (GAMEPLAY::GET_RANDOM_INT_IN_RANGE(0, 100) < 30); // 30% chance far
-	float baseX = offX + jitterX;
-	float baseY = offY + jitterY;
-	if (farSpawn) { baseX += (GAMEPLAY::GET_RANDOM_INT_IN_RANGE(-20, 21)) * 0.5f; baseY += (GAMEPLAY::GET_RANDOM_INT_IN_RANGE(-20, 21)) * 0.5f; }
-	Vector3 pos = ENTITY::GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS(me, baseX, baseY, 0.0f);
-	Ped p = PED::CREATE_PED(modelHash, pos.x, pos.y, pos.z, ENTITY::GET_ENTITY_HEADING(me), 0, 0, 0, 0);
-	STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(modelHash);
-	if (!p || !ENTITY::DOES_ENTITY_EXIST(p)) return 0;
-	PED::SET_PED_VISIBLE(p, TRUE);
-	// Friendly relationships
-	Hash myGroup = PED::GET_PED_RELATIONSHIP_GROUP_DEFAULT_HASH(me);
-	PED::SET_PED_RELATIONSHIP_GROUP_HASH(p, myGroup);
-	int grp = PLAYER::GET_PLAYER_GROUP(PLAYER::PLAYER_ID());
-	if (grp) PED::SET_PED_AS_GROUP_MEMBER(p, grp);
-	// Make durable and capable
-	ENTITY::SET_ENTITY_INVINCIBLE(p, TRUE);
-	PED::SET_PED_ACCURACY(p, 70);
-	PED::SET_PED_COMBAT_ABILITY(p, 2);
-	PED::SET_PED_COMBAT_MOVEMENT(p, 2);
-	// Arm guard with a strong weapon (use stable path like old bodyguard logic)
-	WEAPON::GIVE_DELAYED_WEAPON_TO_PED(p, weaponHash, 120, 1, 0x2cd419dc);
-	WEAPON::SET_CURRENT_PED_WEAPON(p, weaponHash, 1, 0, 0, 0);
-	// Initial behavior: if spawned far, make them run to you and then patrol/follow
-	AI::TASK_CLEAR_LOOK_AT(p);
-	if (farSpawn) {
-		AI::TASK_GO_TO_ENTITY(p, me, -1, 2.5f, 3.5f, 0, 0);
-	} else {
-		AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(p, me, offX, offY, 0.0f, 2.4f, -1, 1.5f, TRUE, FALSE, FALSE, FALSE, FALSE);
-	}
-	return p;
-}
-
-static void ReleaseGuard(Ped p)
-{
-	if (!p || !ENTITY::DOES_ENTITY_EXIST(p)) return;
-	PED::REMOVE_PED_FROM_GROUP(p);
-	AI::CLEAR_PED_TASKS_IMMEDIATELY(p, TRUE, TRUE);
-	Vector3 here = ENTITY::GET_ENTITY_COORDS(p, TRUE, FALSE);
-	AI::TASK_WANDER_IN_AREA(p, here.x, here.y, here.z, 20.0f, 3.0f, 5.0f, TRUE);
-	ENTITY::SET_ENTITY_INVINCIBLE(p, FALSE);
-	ENTITY::SET_PED_AS_NO_LONGER_NEEDED(&p);
-}
-
-// Spawn an Arabian horse near a given ped and return the horse ped
-static Ped SpawnArabianHorseNearPed(Ped nearPed, int variantIndex)
-{
-	if (!nearPed || !ENTITY::DOES_ENTITY_EXIST(nearPed)) return 0;
-	static const char* kArabians[3] = {
-		"A_C_HORSE_ARABIAN_BLACK",
-		"A_C_HORSE_ARABIAN_ROSEGREYBAY",
-		"A_C_HORSE_ARABIAN_WHITE"
-	};
-	if (variantIndex < 0) variantIndex = 0; variantIndex %= 3;
-	Hash modelHash = GAMEPLAY::GET_HASH_KEY((char*)kArabians[variantIndex]);
-	if (!STREAMING::IS_MODEL_IN_CDIMAGE(modelHash) || !STREAMING::IS_MODEL_VALID(modelHash)) return 0;
-	STREAMING::REQUEST_MODEL(modelHash, FALSE);
-	int waits = 0; while (!STREAMING::HAS_MODEL_LOADED(modelHash) && waits < 200) { WAIT(0); ++waits; }
-	Vector3 pos = ENTITY::GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS(nearPed, 2.0f, -1.5f, 0.0f);
-	float heading = ENTITY::GET_ENTITY_HEADING(nearPed);
-	Ped horse = PED::CREATE_PED(modelHash, pos.x, pos.y, pos.z, heading, 0, 0, 0, 0);
-	STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(modelHash);
-	if (!horse || !ENTITY::DOES_ENTITY_EXIST(horse)) return 0;
-	// Make visible, healthy, and calm
-	PED::SET_PED_VISIBLE(horse, TRUE);
-	int maxH = PED::GET_PED_MAX_HEALTH(horse); if (maxH <= 0) maxH = 200;
-	ENTITY::SET_ENTITY_HEALTH(horse, maxH, FALSE);
-	PED::SET_PED_STAMINA(horse, 100.0f);
-	// Keep near its owner by following closely until mounted
-	AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(horse, nearPed, -1.5f, -1.0f, 0.0f, 2.2f, -1, 1.5f, TRUE, FALSE, FALSE, FALSE, FALSE);
-	return horse;
-}
-
-static void ReleaseHorse(Ped horse)
-{
-	if (!horse || !ENTITY::DOES_ENTITY_EXIST(horse)) return;
-	AI::CLEAR_PED_TASKS_IMMEDIATELY(horse, TRUE, TRUE);
-	Vector3 here = ENTITY::GET_ENTITY_COORDS(horse, TRUE, FALSE);
-	AI::TASK_WANDER_IN_AREA(horse, here.x, here.y, here.z, 30.0f, 3.0f, 5.0f, TRUE);
-	ENTITY::SET_PED_AS_NO_LONGER_NEEDED(&horse);
-}
-
-static inline int HeadingBucket(float h) {
-	// Normalize 0..360, map to 8 buckets (N, NE, E, SE, S, SW, W, NW)
-	while (h < 0) h += 360.0f; while (h >= 360.0f) h -= 360.0f;
-	float step = 360.0f / 8.0f; int b = int((h + step/2) / step) % 8; return b;
-}
-static inline const wchar_t* BucketName8(int b) {
-	static const wchar_t* names[8] = { L"north", L"north east", L"east", L"south east", L"south", L"south west", L"west", L"north west" };
-	if (b < 0 || b > 7) return L""; return names[b];
-}
-
-static inline void PlayWavAsync(const wchar_t* fileName)
-{
-	if (!fileName || !*fileName) return;
-	// Non-blocking, OS-mixed playback; relies on wavs sitting next to the ASI
-	PlaySoundW(fileName, NULL, SND_FILENAME | SND_ASYNC | SND_NODEFAULT);
-}
-
-static inline void BeepAsync(int freq, int durMs)
-{
-	if (freq < 37) freq = 37; // Beep limits
-	if (freq > 32767) freq = 32767;
-	if (durMs < 5) durMs = 5; if (durMs > 200) durMs = 200;
-	std::thread([freq, durMs]() {
-		// Beep is blocking; run in a short-lived detached thread
-		Beep(freq, durMs);
-	}).detach();
-}
-
-// Auto-Defense System: Scan for hostile entities within radius and eliminate them
-static void ScanAndEliminateHostiles()
-{
-	if (!g_autoDefenseEnabled) return;
-	
-	DWORD now = GetTickCount();
-	if ((now - g_lastAutoDefenseScanMs) < g_autoDefenseScanInterval) return;
-	g_lastAutoDefenseScanMs = now;
-	
-	Ped playerPed = PLAYER::PLAYER_PED_ID();
-	if (!playerPed || !ENTITY::DOES_ENTITY_EXIST(playerPed) || ENTITY::IS_ENTITY_DEAD(playerPed)) return;
-	
-	Vector3 playerPos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
-	Ped playerHorse = 0;
-	if (PED::IS_PED_ON_MOUNT(playerPed)) {
-		playerHorse = PED::GET_MOUNT(playerPed);
-	}
-	
-	// Get nearby peds
-	int packed[33] = { 32 };
-	int count = PED::GET_PED_NEARBY_PEDS(playerPed, packed, -1, 0);
-	if (count <= 0) return;
-	
-	int lim = packed[0]; if (lim > 32) lim = 32;
-	for (int i = 1; i <= lim; ++i)
-	{
-		Ped target = (Ped)packed[i];
-		if (!target || target == playerPed) continue;
-		if (!ENTITY::DOES_ENTITY_EXIST(target) || ENTITY::IS_ENTITY_DEAD(target)) continue;
-		if (PED::IS_PED_A_PLAYER(target)) continue; // never attack players
-		
-		// Skip if it's the player's horse
-		if (playerHorse && target == playerHorse) continue;
-		
-		// Skip if it's one of our guards
-		bool isOurGuard = false;
-		for (const auto& squad : g_squads) {
-			for (const auto& guard : squad.guards) {
-				if (guard.ped == target || guard.horse == target) {
-					isOurGuard = true;
-					break;
-				}
-			}
-			if (isOurGuard) break;
-		}
-		if (isOurGuard) continue;
-		
-		// Check distance
-		Vector3 targetPos = ENTITY::GET_ENTITY_COORDS(target, TRUE, FALSE);
-		float distance = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(playerPos.x, playerPos.y, playerPos.z, 
-														       targetPos.x, targetPos.y, targetPos.z, TRUE);
-		if (distance > g_autoDefenseRadius) continue;
-		
-		// Check if hostile (attacking player, or in combat, or hostile relationship)
-		bool isHostile = false;
-		if (PED::IS_PED_IN_COMBAT(target, playerPed) || 
-			PED::GET_PED_RELATIONSHIP_GROUP_HASH(target) != PED::GET_PED_RELATIONSHIP_GROUP_HASH(playerPed)) {
-			isHostile = true;
-		}
-		
-		// Also check for predatory animals
-		Hash model = ENTITY::GET_ENTITY_MODEL(target);
-		if (PED::IS_PED_HUMAN(target) == false) { // it's an animal
-			// Assume hostile if it's a predator (simplified check)
-			isHostile = true;
-		}
-		
-		if (isHostile) {
-			// Eliminate silently
-			ENTITY::SET_ENTITY_HEALTH(target, 0, 0);
-		}
-	}
-}
-
-// Best-effort wallet reader: prefer CASH natives, then fall back to PED::GET_PED_MONEY
-static int ReadPlayerMoneyCents(Ped me)
-{
-	int best = -1;
-	// Try CASH getters (names unknown in headers; using hashes via wrappers)
-	// These return Any; interpret as int cents if plausible
-	{
-		int v0 = (int)CASH::_0x0C02DABFA3B98176();
-		if (v0 > best) best = v0;
-	}
-	{
-		int v1 = (int)CASH::_0xA46FD001D1BE896C();
-		if (v1 > best) best = v1;
-	}
-	{
-		int v2 = (int)CASH::_0x282D36FF103D78DF();
-		if (v2 > best) best = v2;
-	}
-	{
-		int v3 = (int)CASH::_0x8A67120DBC299525();
-		if (v3 > best) best = v3;
-	}
-	// Fallback: ped money
-	int pedMoney = PED::GET_PED_MONEY(me);
-	if (pedMoney > best) best = pedMoney;
-	return best;
-}
 
 class MenuItemPlayerFastHeal : public MenuItemSwitchable
 {
@@ -809,6 +39,7 @@ public:
 	MenuItemPlayerFastHeal(string caption)
 		: MenuItemSwitchable(caption) {}
 };
+
 class MenuItemPlayerFix : public MenuItemDefault
 {
 	virtual void OnSelect()
@@ -892,11 +123,7 @@ public:
 class MenuItemPlayerAddCash : public MenuItemDefault
 {
 	int m_value;
-	virtual void OnSelect()	{ 
-		CASH::PLAYER_ADD_CASH(m_value, 0x2cd419dc);
-		std::wstring wcaption(GetCaption().begin(), GetCaption().end());
-		if (!wcaption.empty()) A11y::speak(wcaption, true);
-	}
+	virtual void OnSelect()	{ CASH::PLAYER_ADD_CASH(m_value, 0x2cd419dc); }
 public:
 	MenuItemPlayerAddCash(string caption, int value)
 		: MenuItemDefault(caption),
@@ -1005,74 +232,6 @@ public:
 		: MenuItemSwitchable(caption) {}
 };
 
-// Accessibility: master speech toggle and targeting cue toggle
-class MenuItemA11yMasterSwitch : public MenuItemSwitchable
-{
-	virtual void OnSelect()
-	{
-		bool newState = !GetState();
-		A11y::setEnabled(newState);
-		SetState(newState);
-	}
-public:
-	MenuItemA11yMasterSwitch(string caption)
-		: MenuItemSwitchable(caption)
-	{
-		SetState(A11y::isEnabled());
-	}
-};
-
-class MenuItemA11yAimingCues : public MenuItemSwitchable
-{
-	virtual void OnSelect()
-	{
-		bool newState = !GetState();
-		g_enableAimingWavCues = newState;
-		SetState(newState);
-	}
-public:
-	MenuItemA11yAimingCues(string caption)
-		: MenuItemSwitchable(caption)
-	{
-		SetState(g_enableAimingWavCues);
-	}
-};
-
-class MenuItemA11yAutoZones : public MenuItemSwitchable
-{
-	virtual void OnSelect() { bool ns = !GetState(); g_enableAutoZones = ns; SetState(ns); }
-public:
-	MenuItemA11yAutoZones(string caption) : MenuItemSwitchable(caption) { SetState(g_enableAutoZones); }
-};
-
-class MenuItemA11yAutoHeading : public MenuItemSwitchable
-{
-	virtual void OnSelect() { bool ns = !GetState(); g_enableAutoHeading = ns; SetState(ns); }
-public:
-	MenuItemA11yAutoHeading(string caption) : MenuItemSwitchable(caption) { SetState(g_enableAutoHeading); }
-};
-
-class MenuItemA11yInventoryMonitoring : public MenuItemSwitchable
-{
-public:
-	virtual void OnSelect() { bool ns = !GetState(); g_enableInventoryMonitoring = ns; SetState(ns); }
-	MenuItemA11yInventoryMonitoring(string caption) : MenuItemSwitchable(caption) { SetState(g_enableInventoryMonitoring); }
-};
-
-class MenuItemA11yGroundItemScanning : public MenuItemSwitchable
-{
-public:
-	virtual void OnSelect() { bool ns = !GetState(); g_enableGroundItemScanning = ns; SetState(ns); }
-	MenuItemA11yGroundItemScanning(string caption) : MenuItemSwitchable(caption) { SetState(g_enableGroundItemScanning); }
-};
-
-class MenuItemA11yPickupAnnouncements : public MenuItemSwitchable
-{
-public:
-	virtual void OnSelect() { bool ns = !GetState(); g_enablePickupAnnouncements = ns; SetState(ns); }
-	MenuItemA11yPickupAnnouncements(string caption) : MenuItemSwitchable(caption) { SetState(g_enablePickupAnnouncements); }
-};
-
 class MenuItemPlayerNoiseless : public MenuItemSwitchable
 {
 	virtual void OnSelect()
@@ -1120,20 +279,48 @@ public:
 class MenuItemPlayerTeleport : public MenuItemDefault
 {
 	Vector3 m_pos;
+	float m_heading;
+	bool m_isIndoor;
+
 	virtual void OnSelect()
 	{
-		Entity e = PLAYER::PLAYER_PED_ID();
-		if (PED::IS_PED_ON_MOUNT(e))
-			e = PED::GET_MOUNT(e);
-		else
-		if (PED::IS_PED_IN_ANY_VEHICLE(e, FALSE))
-			e = PED::GET_VEHICLE_PED_IS_USING(e);
-		ENTITY::SET_ENTITY_COORDS(e, m_pos.x, m_pos.y, m_pos.z, 0, 0, 1, FALSE);
+		Entity playerPed = PLAYER::PLAYER_PED_ID();
+		Entity targetEnt = playerPed;
+		bool mounted = PED::IS_PED_ON_MOUNT(playerPed);
+		Entity horse = mounted ? PED::GET_MOUNT(playerPed) : 0;
+		Entity veh = (!mounted && PED::IS_PED_IN_ANY_VEHICLE(playerPed, FALSE)) ? PED::GET_VEHICLE_PED_IS_USING(playerPed) : 0;
+
+		if (mounted) {
+			targetEnt = horse;
+		} else if (veh) {
+			targetEnt = veh;
+		}
+
+		// Clear velocity before teleporting to prevent sliding or flinging
+		ENTITY::SET_ENTITY_VELOCITY(playerPed, 0.0f, 0.0f, 0.0f);
+		ENTITY::SET_ENTITY_VELOCITY(targetEnt, 0.0f, 0.0f, 0.0f);
+
+		// Teleport entity to exact coordinates (no ground check)
+		STREAMING::REQUEST_COLLISION_AT_COORD(m_pos.x, m_pos.y, m_pos.z);
+		ENTITY::SET_ENTITY_COORDS(targetEnt, m_pos.x, m_pos.y, m_pos.z, 0, 0, 1, FALSE);
+
+		// Apply heading alignment if specified
+		if (m_heading != -1.0f) {
+			ENTITY::SET_ENTITY_HEADING(targetEnt, m_heading);
+			if (targetEnt != playerPed) {
+				ENTITY::SET_ENTITY_HEADING(playerPed, m_heading);
+			}
+			CAM::SET_GAMEPLAY_CAM_RELATIVE_HEADING(0.0f, 1.0f);
+		}
+
+		DebugLog::log("Instant Teleport: Warped entity to (%f, %f, %f) heading %f", m_pos.x, m_pos.y, m_pos.z, m_heading);
 	}
 public:
-	MenuItemPlayerTeleport(string caption, Vector3 pos)
+	MenuItemPlayerTeleport(string caption, Vector3 pos, float heading = -1.0f, bool isIndoor = false)
 		: MenuItemDefault(caption), 
-		  m_pos(pos) {}
+		  m_pos(pos),
+		  m_heading(heading),
+		  m_isIndoor(isIndoor) {}
 };
 
 class MenuItemPlayerTeleportToMarker : public MenuItemDefault
@@ -1459,9 +646,19 @@ class MenuItemWeaponNoReload : public MenuItemSwitchable
 {
 	virtual void OnFrame()
 	{
-	// Disabled per user request: do not give ammo automatically.
-	// Keeping this method as a no-op ensures no ammo is added when holding/switching weapons.
-	return;
+		if (!GetState())
+			return;
+		Ped playerPed = PLAYER::PLAYER_PED_ID();
+		Hash cur;
+		if (WEAPON::GET_CURRENT_PED_WEAPON(playerPed, &cur, 0, 0, 0) && WEAPON::IS_WEAPON_VALID(cur))
+		{
+			int maxAmmo;
+			if (WEAPON::GET_MAX_AMMO(playerPed, &maxAmmo, cur))
+				WEAPON::SET_PED_AMMO(playerPed, cur, maxAmmo);
+			maxAmmo = WEAPON::GET_MAX_AMMO_IN_CLIP(playerPed, cur, 1);
+			if (maxAmmo > 0)
+				WEAPON::SET_AMMO_IN_CLIP(playerPed, cur, maxAmmo);
+		}
 	}
 public:
 	MenuItemWeaponNoReload(string caption)
@@ -1661,43 +858,6 @@ public:
 		: MenuItemSwitchable(caption) {}
 };
 
-// Riot mode toggle: make nearby peds fight each other until disabled
-class MenuItemRiotMode : public MenuItemSwitchable
-{
-	virtual void OnSelect()
-	{
-		bool ns = !GetState();
-		SetState(ns);
-		g_riotEnabled = ns;
-		if (ns) A11y::speak(L"riot on", true); else A11y::speak(L"riot off", true);
-		if (!ns)
-		{
-			// Try to calm down nearby peds
-			Ped me = PLAYER::PLAYER_PED_ID();
-			if (ENTITY::DOES_ENTITY_EXIST(me))
-			{
-				int packed[33] = { 32 };
-				int count = PED::GET_PED_NEARBY_PEDS(me, packed, -1, 0);
-				if (count > 0)
-				{
-					int lim = packed[0]; if (lim > 32) lim = 32;
-					for (int i = 1; i <= lim; ++i)
-					{
-						Ped p = (Ped)packed[i];
-						if (!p || p == me) continue;
-						if (!ENTITY::DOES_ENTITY_EXIST(p) || ENTITY::IS_ENTITY_DEAD(p) || PED::IS_PED_A_PLAYER(p)) continue;
-						AI::CLEAR_PED_TASKS(p, TRUE, TRUE);
-						Vector3 pc = ENTITY::GET_ENTITY_COORDS(p, TRUE, FALSE);
-						AI::TASK_WANDER_IN_AREA(p, pc.x, pc.y, pc.z, 60.0f, 3.0f, 6.0f, TRUE);
-					}
-				}
-			}
-		}
-	}
-public:
-	MenuItemRiotMode(string caption) : MenuItemSwitchable(caption) { SetState(g_riotEnabled); }
-};
-
 class MenuItemMiscAddHonor : public MenuItemDefault
 {
 	virtual void OnSelect()
@@ -1830,30 +990,113 @@ MenuBase *CreatePlayerTeleportMenu(MenuController *controller)
 
 	menu->AddItem(new MenuItemPlayerTeleportToMarker("MARKER"));
 
-menu->AddItem(new MenuItemPlayerTeleport("SOUTH MAP",     { -5311.2583,  -4612.00,   -10.63389 }));
-	menu->AddItem(new MenuItemPlayerTeleport("SOUTH GUAMA",   { 1315.66381,  -6815.48,   42.377101 }));
-	menu->AddItem(new MenuItemPlayerTeleport("ANNESBURG",     { 2898.593994, 1239.85253, 44.073299 }));
-	menu->AddItem(new MenuItemPlayerTeleport("STRAWBERRY",	  { -1725.22143, -418.11560, 153.55740 }));
-	menu->AddItem(new MenuItemPlayerTeleport("VALENTINE",	  { -213.152496, 691.802979, 112.37100 }));
-	menu->AddItem(new MenuItemPlayerTeleport("RHODES",		  { 1282.707520, -1275.7485, 74.945099 }));
-	menu->AddItem(new MenuItemPlayerTeleport("SAINT DENIS",   { 2336.584961, -1106.2358, 44.737598 }));
-	menu->AddItem(new MenuItemPlayerTeleport("WAPITI",		  { 538.738525,  2217.46557, 240.23280 }));
-	menu->AddItem(new MenuItemPlayerTeleport("BUTCHERCREEK",  { 2552.203613, 835.510010, 81.183098 }));
-	menu->AddItem(new MenuItemPlayerTeleport("BLACKWATER",	  { -798.338379, -1238.9395, 43.537899 }));
-	menu->AddItem(new MenuItemPlayerTeleport("BEECHERS",	  { -1653.19738, -1448.8156, 82.503502 }));
-	menu->AddItem(new MenuItemPlayerTeleport("CALIGA HALL",   { 1705.509888, -1386.3237, 42.884998 }));	
-	menu->AddItem(new MenuItemPlayerTeleport("BRAITHWAITE",   { 1011.190674, -1661.6768, 45.918301 }));	
-	menu->AddItem(new MenuItemPlayerTeleport("VANHORN",		  { 2982.234863, 445.724915, 51.491501 }));	
-	menu->AddItem(new MenuItemPlayerTeleport("CORNWALL",	  { 437.7247920, 494.582092, 107.67649 }));
-	menu->AddItem(new MenuItemPlayerTeleport("COLTER",		  { -1371.6590,  2388.5073,  307.7218  }));
-	menu->AddItem(new MenuItemPlayerTeleport("EMERALD RANCH", { 1332.332642, 300.425110, 86.306297 }));	
-	menu->AddItem(new MenuItemPlayerTeleport("PRONGHORN",	  { -2616.57714, 519.256775, 144.10809 }));
-	menu->AddItem(new MenuItemPlayerTeleport("MANZANITA POST",{ -1977.98754, -1545.6749, 112.87020 }));
-	menu->AddItem(new MenuItemPlayerTeleport("LAGRAS",		  { 2111.099121, -662.25317, 41.259899 }));
-	menu->AddItem(new MenuItemPlayerTeleport("ARMADILLO",	  { -3622.65527, -2586.5795, -15.36900 }));
-	menu->AddItem(new MenuItemPlayerTeleport("TUMBLEWEED",	  { -5382.39453, -2940.1596, 1.582700  }));	
-	menu->AddItem(new MenuItemPlayerTeleport("MACFARLANES RANCH", { -2296.26318, -2454.4101, 60.969898 }));
-	menu->AddItem(new MenuItemPlayerTeleport("BENEDICT POINT",{ -5269.60400, -3411.0588, -23.15930 }));		
+	// Submenu: Towns & Cities
+	MenuBase *townsMenu = new MenuBase(new MenuItemListTitle("TOWNS & CITIES"));
+	controller->RegisterMenu(townsMenu);
+	townsMenu->AddItem(new MenuItemPlayerTeleport("SOUTH MAP",     { -5311.2583,  -4612.00,   -10.63389 }));
+	townsMenu->AddItem(new MenuItemPlayerTeleport("SOUTH GUAMA",   { 1315.66381,  -6815.48,   42.377101 }));
+	townsMenu->AddItem(new MenuItemPlayerTeleport("ANNESBURG",     { 2898.593994, 1239.85253, 44.073299 }));
+	townsMenu->AddItem(new MenuItemPlayerTeleport("STRAWBERRY",	  { -1725.22143, -418.11560, 153.55740 }));
+	townsMenu->AddItem(new MenuItemPlayerTeleport("VALENTINE",	  { -213.152496, 691.802979, 112.37100 }));
+	townsMenu->AddItem(new MenuItemPlayerTeleport("RHODES",		  { 1282.707520, -1275.7485, 74.945099 }));
+	townsMenu->AddItem(new MenuItemPlayerTeleport("SAINT DENIS",   { 2336.584961, -1106.2358, 44.737598 }));
+	townsMenu->AddItem(new MenuItemPlayerTeleport("WAPITI",		  { 538.738525,  2217.46557, 240.23280 }));
+	townsMenu->AddItem(new MenuItemPlayerTeleport("BUTCHERCREEK",  { 2552.203613, 835.510010, 81.183098 }));
+	townsMenu->AddItem(new MenuItemPlayerTeleport("BLACKWATER",	  { -798.338379, -1238.9395, 43.537899 }));
+	townsMenu->AddItem(new MenuItemPlayerTeleport("BEECHERS",	  { -1653.19738, -1448.8156, 82.503502 }));
+	townsMenu->AddItem(new MenuItemPlayerTeleport("CALIGA HALL",   { 1705.509888, -1386.3237, 42.884998 }));	
+	townsMenu->AddItem(new MenuItemPlayerTeleport("BRAITHWAITE",   { 1011.190674, -1661.6768, 45.918301 }));	
+	townsMenu->AddItem(new MenuItemPlayerTeleport("VANHORN",		  { 2982.234863, 445.724915, 51.491501 }));	
+	townsMenu->AddItem(new MenuItemPlayerTeleport("CORNWALL",	  { 437.7247920, 494.582092, 107.67649 }));
+	townsMenu->AddItem(new MenuItemPlayerTeleport("COLTER",		  { -1371.6590,  2388.5073,  307.7218  }));
+	townsMenu->AddItem(new MenuItemPlayerTeleport("EMERALD RANCH", { 1332.332642, 300.425110, 86.306297 }));	
+	townsMenu->AddItem(new MenuItemPlayerTeleport("PRONGHORN",	  { -2616.57714, 519.256775, 144.10809 }));
+	townsMenu->AddItem(new MenuItemPlayerTeleport("MANZANITA POST",{ -1977.98754, -1545.6749, 112.87020 }));
+	townsMenu->AddItem(new MenuItemPlayerTeleport("LAGRAS",		  { 2111.099121, -662.25317, 41.259899 }));
+	townsMenu->AddItem(new MenuItemPlayerTeleport("ARMADILLO",	  { -3622.65527, -2586.5795, -15.36900 }));
+	townsMenu->AddItem(new MenuItemPlayerTeleport("TUMBLEWEED",	  { -5382.39453, -2940.1596, 1.582700  }));	
+	townsMenu->AddItem(new MenuItemPlayerTeleport("MACFARLANES RANCH", { -2296.26318, -2454.4101, 60.969898 }));
+	townsMenu->AddItem(new MenuItemPlayerTeleport("BENEDICT POINT",{ -5269.60400, -3411.0588, -23.15930 }));		
+	menu->AddItem(new MenuItemMenu("TOWNS & CITIES", townsMenu));
+
+	// Submenu: Gunsmiths
+	MenuBase *gunsmithsMenu = new MenuBase(new MenuItemListTitle("GUNSMITHS"));
+	controller->RegisterMenu(gunsmithsMenu);
+	gunsmithsMenu->AddItem(new MenuItemPlayerTeleport("VALENTINE GUNSMITH", { -174.0f, 635.0f, 114.0f }, 25.0f, true));
+	gunsmithsMenu->AddItem(new MenuItemPlayerTeleport("RHODES GUNSMITH",    { 1281.0f, -1303.0f, 77.0f }, 90.0f, true));
+	gunsmithsMenu->AddItem(new MenuItemPlayerTeleport("SAINT DENIS GUNSMITH", { 2504.0f, -1306.0f, 46.0f }, 180.0f, true));
+	gunsmithsMenu->AddItem(new MenuItemPlayerTeleport("ANNESBURG GUNSMITH",  { 2929.0f, 1307.0f, 44.0f }, 270.0f, true));
+	gunsmithsMenu->AddItem(new MenuItemPlayerTeleport("BLACKWATER GUNSMITH", { -838.0f, -1302.0f, 43.0f }, 270.0f, true));
+	gunsmithsMenu->AddItem(new MenuItemPlayerTeleport("TUMBLEWEED GUNSMITH", { -5508.0f, -2938.0f, -1.0f }, 0.0f, true));
+	menu->AddItem(new MenuItemMenu("GUNSMITHS", gunsmithsMenu));
+
+	// Submenu: Stables
+	MenuBase *stablesMenu = new MenuBase(new MenuItemListTitle("STABLES"));
+	controller->RegisterMenu(stablesMenu);
+	stablesMenu->AddItem(new MenuItemPlayerTeleport("VALENTINE STABLE",  { -142.0f, 615.0f, 114.0f }, 0.0f, true));
+	stablesMenu->AddItem(new MenuItemPlayerTeleport("RHODES STABLE",     { 1343.0f, -1326.0f, 73.0f }, 180.0f, true));
+	stablesMenu->AddItem(new MenuItemPlayerTeleport("SAINT DENIS STABLE", { 2475.0f, -1103.0f, 46.0f }, 90.0f, true));
+	stablesMenu->AddItem(new MenuItemPlayerTeleport("BLACKWATER STABLE", { -773.0f, -1256.0f, 43.0f }, 0.0f, true));
+	menu->AddItem(new MenuItemMenu("STABLES", stablesMenu));
+
+	// Submenu: Barbers
+	MenuBase *barbersMenu = new MenuBase(new MenuItemListTitle("BARBERS"));
+	controller->RegisterMenu(barbersMenu);
+	barbersMenu->AddItem(new MenuItemPlayerTeleport("VALENTINE BARBER",   { -164.0f, 625.0f, 114.0f }, 25.0f, true));
+	barbersMenu->AddItem(new MenuItemPlayerTeleport("SAINT DENIS BARBER",  { 2663.2f, -1182.4f, 53.2f }, 270.0f, true));
+	barbersMenu->AddItem(new MenuItemPlayerTeleport("BLACKWATER BARBER",   { -814.0f, -1282.0f, 43.0f }, 180.0f, true));
+	menu->AddItem(new MenuItemMenu("BARBERS", barbersMenu));
+
+	// Submenu: Saloons & Hotels
+	MenuBase *saloonsMenu = new MenuBase(new MenuItemListTitle("SALOONS & HOTELS"));
+	controller->RegisterMenu(saloonsMenu);
+	saloonsMenu->AddItem(new MenuItemPlayerTeleport("VALENTINE SALOON", { -164.0f, 625.0f, 114.0f }, 25.0f, true));
+	saloonsMenu->AddItem(new MenuItemPlayerTeleport("VALENTINE HOTEL",  { -218.0f, 659.0f, 114.0f }, 210.0f, true));
+	saloonsMenu->AddItem(new MenuItemPlayerTeleport("RHODES SALOON",     { 1309.0f, -1238.0f, 75.0f }, 90.0f, true));
+	saloonsMenu->AddItem(new MenuItemPlayerTeleport("SAINT DENIS SALOON", { 2454.0f, -1246.0f, 46.0f }, 90.0f, true));
+	saloonsMenu->AddItem(new MenuItemPlayerTeleport("BLACKWATER SALOON", { -793.0f, -1311.0f, 43.0f }, 180.0f, true));
+	saloonsMenu->AddItem(new MenuItemPlayerTeleport("ARMADILLO SALOON",   { -3689.0f, -2648.0f, -14.0f }, 270.0f, true));
+	menu->AddItem(new MenuItemMenu("SALOONS & HOTELS", saloonsMenu));
+
+	// Submenu: General Stores
+	MenuBase *storesMenu = new MenuBase(new MenuItemListTitle("GENERAL STORES"));
+	controller->RegisterMenu(storesMenu);
+	storesMenu->AddItem(new MenuItemPlayerTeleport("VALENTINE STORE",   { -192.0f, 651.0f, 114.0f }, 210.0f, true));
+	storesMenu->AddItem(new MenuItemPlayerTeleport("STRAWBERRY STORE",   { -1755.0f, -403.0f, 159.0f }, 270.0f, true));
+	storesMenu->AddItem(new MenuItemPlayerTeleport("RHODES STORE",       { 1321.0f, -1296.0f, 76.0f }, 90.0f, true));
+	storesMenu->AddItem(new MenuItemPlayerTeleport("SAINT DENIS STORE",  { 2558.0f, -1163.0f, 46.0f }, 270.0f, true));
+	storesMenu->AddItem(new MenuItemPlayerTeleport("BLACKWATER STORE",   { -867.0f, -1281.0f, 43.0f }, 90.0f, true));
+	storesMenu->AddItem(new MenuItemPlayerTeleport("ARMADILLO STORE",   { -3658.0f, -2613.0f, -14.0f }, 90.0f, true));
+	menu->AddItem(new MenuItemMenu("GENERAL STORES", storesMenu));
+
+	// Submenu: Doctors
+	MenuBase *doctorsMenu = new MenuBase(new MenuItemListTitle("DOCTORS"));
+	controller->RegisterMenu(doctorsMenu);
+	doctorsMenu->AddItem(new MenuItemPlayerTeleport("VALENTINE DOCTOR",   { -193.0f, 593.0f, 114.0f }, 210.0f, true));
+	doctorsMenu->AddItem(new MenuItemPlayerTeleport("SAINT DENIS DOCTOR",  { 2552.0f, -1285.0f, 46.0f }, 0.0f, true));
+	menu->AddItem(new MenuItemMenu("DOCTORS", doctorsMenu));
+
+	// Submenu: Trappers & Tailors
+	MenuBase *trappersMenu = new MenuBase(new MenuItemListTitle("TRAPPERS & TAILORS"));
+	controller->RegisterMenu(trappersMenu);
+	trappersMenu->AddItem(new MenuItemPlayerTeleport("SAINT DENIS TRAPPER",  { 2644.0f, -1181.0f, 46.0f }, 0.0f, true));
+	trappersMenu->AddItem(new MenuItemPlayerTeleport("RIGGS STATION TRAPPER", { -4612.0f, -2728.0f, -4.0f }, 0.0f, true));
+	trappersMenu->AddItem(new MenuItemPlayerTeleport("SAINT DENIS TAILOR",   { 2567.0f, -1232.0f, 46.0f }, 270.0f, true));
+	menu->AddItem(new MenuItemMenu("TRAPPERS & TAILORS", trappersMenu));
+
+	// Submenu: Post Offices
+	MenuBase *postOfficesMenu = new MenuBase(new MenuItemListTitle("POST OFFICES"));
+	controller->RegisterMenu(postOfficesMenu);
+	postOfficesMenu->AddItem(new MenuItemPlayerTeleport("VALENTINE POST OFFICE",   { -179.0f, 649.0f, 114.0f }, 0.0f, true));
+	postOfficesMenu->AddItem(new MenuItemPlayerTeleport("RHODES POST OFFICE",      { 1232.20f, -1251.08f, 73.67f }, 90.0f, true));
+	postOfficesMenu->AddItem(new MenuItemPlayerTeleport("SAINT DENIS POST OFFICE", { 2747.49f, -1403.77f, 46.19f }, 180.0f, true));
+	postOfficesMenu->AddItem(new MenuItemPlayerTeleport("ANNESBURG POST OFFICE",    { 2904.36f, 1248.80f, 44.87f }, 90.0f, true));
+	postOfficesMenu->AddItem(new MenuItemPlayerTeleport("VAN HORN POST OFFICE",     { 2983.45f, 430.15f, 51.17f }, 270.0f, true));
+	postOfficesMenu->AddItem(new MenuItemPlayerTeleport("EMERALD STATION POST",     { 1417.82f, 268.03f, 89.62f }, 0.0f, true));
+	postOfficesMenu->AddItem(new MenuItemPlayerTeleport("WALLACE STATION POST",     { -1350.0f, 530.0f, 96.0f }, 90.0f, true));
+	postOfficesMenu->AddItem(new MenuItemPlayerTeleport("FLATNECK STATION POST",    { -182.0f, 757.0f, 118.0f }, 180.0f, true));
+	postOfficesMenu->AddItem(new MenuItemPlayerTeleport("RIGGS STATION POST",       { -4612.0f, -2728.0f, -4.0f }, 0.0f, true));
+	menu->AddItem(new MenuItemMenu("POST OFFICES", postOfficesMenu));
 
 	return menu;
 }
@@ -2269,7 +1512,6 @@ MenuBase *CreateMiscMenu(MenuController *controller)
 	menu->AddItem(new MenuItemMiscRevealMap("REVEAL MAP"));
 	menu->AddItem(new MenuItemMiscAddHonor("ADD HONOR"));
 	menu->AddItem(new MenuItemMiscHideHud("HIDE HUD"));
-	menu->AddItem(new MenuItemRiotMode("RIOT MODE"));
 
 	menu->AddItem(new MenuItemMiscTransportGuns("HORSE TURRETS", true, true));
 	menu->AddItem(new MenuItemMiscTransportGuns("HORSE CANNONS", true, false));
@@ -2279,302 +1521,3412 @@ MenuBase *CreateMiscMenu(MenuController *controller)
 	return menu;
 }
 
-// --- Guard Manager (skeleton, placeholders) ---
-class MenuItemSpeakOnSelect : public MenuItemDefault {
-	std::wstring m_msg;
-	virtual void OnSelect() {
-		if (!m_msg.empty()) A11y::speak(m_msg, true);
-	}
-public:
-	MenuItemSpeakOnSelect(std::string caption, const std::wstring& msg)
-		: MenuItemDefault(caption), m_msg(msg) {}
+// =======================================
+// SQUAD-BASED BODYGUARD SYSTEM (v2)
+// =======================================
+
+// --- Guard/Squad data structures ---
+struct GuardInfo { Ped ped{0}; Ped horse{0}; bool mounted{false}; };
+struct Squad { std::vector<GuardInfo> guards; };
+static std::vector<Squad> g_squads;
+static int g_activeSquad = -1;
+
+struct PendingSpawn {
+	string pedModelName;
+	DWORD pedModelHash;
+	bool needsHorse;
+	DWORD horseModelHash;
+	unsigned long queueTime;
+};
+static std::vector<PendingSpawn> g_pendingSpawns;
+
+// Squad behavior
+enum class SquadOrder { Follow = 0, Hold = 1, GuardHere = 2, Patrol = 3 };
+static SquadOrder g_activeSquadOrder = SquadOrder::Follow;
+static Vector3 g_guardHerePos{};
+
+// Formation
+enum class GuardFormation { Column = 0, Line = 1, Wedge = 2 };
+static GuardFormation g_activeFormation = GuardFormation::Column;
+
+// Auto-defense
+static bool g_autoDefenseEnabled = false;
+static float g_autoDefenseRadius = 30.0f;
+static DWORD g_lastAutoDefenseScanMs = 0;
+
+// Throttle timers
+static DWORD g_lastFormationTickMs = 0;
+static DWORD g_lastPatrolTickMs = 0;
+static DWORD g_lastCrowdControlTickMs = 0;
+static DWORD g_lastGuardDefenseTickMs = 0;
+
+// Auto mount/dismount tracking
+static bool g_playerWasMounted = false;
+
+// General menu tracking
+enum ActiveMenuType {
+	MENU_NONE,
+	MENU_PAUSE,
+	MENU_SATCHEL,
+	MENU_JOURNAL
+};
+static ActiveMenuType g_activeMenuType = MENU_NONE;
+
+// Satchel categories
+static const wchar_t* g_satchelCategories[] = {
+	L"Provisions", L"Kit", L"Valuables", L"Documents", L"Ingredients"
+};
+static const int g_satchelCategoryCount = 5;
+static int g_satchelCategoryIndex = 0;
+static int g_satchelItemIndex = 0;
+
+// Journal categories
+static const wchar_t* g_journalCategories[] = {
+	L"Log", L"Objectives", L"Notes", L"Map Legend"
+};
+static const int g_journalCategoryCount = 4;
+static int g_journalCategoryIndex = 0;
+static int g_journalItemIndex = 0;
+
+// Pause menu tracking
+static bool g_wasPauseMenuActive = false;
+
+// =======================================
+// GUARD SETTINGS (toggled from Squad Manager menu)
+// =======================================
+static bool g_guardHorseEnabled = true;
+static bool g_guardInvincibleEnabled = true;
+
+// =======================================
+// ACCESSIBILITY AUTO-ANNOUNCE SETTINGS
+// =======================================
+static bool g_autoMoneyAnnounce = true;
+static bool g_autoHorseStateAnnounce = true;
+static bool g_autoGuardStatusAnnounce = true;
+static bool g_autoHorseCallAnnounce = true;
+static bool g_autoCompassAnnounce = true;
+static bool g_autoHonorAnnounce = false;
+static int g_lastPlayerHonor = -9999;
+static DWORD g_lastHonorCheckMs = 0;
+
+static bool g_autoLootAnnounce = true;
+static bool g_isLootingCorpse = false;
+static Ped g_lootedPed = 0;
+static DWORD g_lootCheckMs = 0;
+
+// Auto-aim system
+static bool g_autoAimEnabled = false;
+static DWORD g_lastAutoAimMs = 0;
+static Entity g_autoAimTarget = 0;
+
+// Auto-announce tracking state
+static int g_lastMoneyCents = -1;
+static int g_lastHorseStateId = -1;  // 0=idle,1=walk,2=trot,3=canter,4=gallop
+static DWORD g_lastMoneyCheckMs = 0;
+static DWORD g_lastHorseStateCheckMs = 0;
+static DWORD g_lastGuardAutoStatusMs = 0;
+static int g_lastAliveCount = -1;
+static int g_lastFightingCount = -1;
+
+// Auto weapon change tracking
+static Hash g_lastWeaponHash = 0;
+static DWORD g_lastWeaponCheckMs = 0;
+
+// Auto mount/horse proximity tracking
+static bool g_wasPlayerMounted = false;
+static Ped g_lastAnnouncedHorse = 0;
+static DWORD g_lastHorseProximityCheckMs = 0;
+static bool g_horseWhistleActive = false;
+static DWORD g_horseWhistleStartMs = 0;
+static Ped g_whistleTargetHorse = 0;
+static DWORD g_lastHorseDistAnnounceMs = 0;
+static float g_lastHorseAnnouncedDist = 0.0f;
+
+// Auto compass direction tracking
+static int g_lastCompassDir = -1;
+static DWORD g_lastCompassCheckMs = 0;
+
+// Animal guard behavior tracking
+static bool g_autoAnimalBehaviorAnnounce = true;
+static DWORD g_lastAnimalBehaviorCheckMs = 0;
+// Per-guard last announced behavior (indexed by ped handle)
+static std::unordered_map<int, int> g_animalLastBehavior; // ped -> behavior id
+
+// Aiming target announcements
+static Entity g_lastAimedEntity = 0;
+static bool g_wasAiming = false;
+static DWORD g_lastAimCheckMs = 0;
+
+// Navigation mode: activity/POI browser + auto-walk
+static bool g_autoWalkActive = false;
+static bool g_navIgnoreNPCs = false;
+static int g_navHorseSpeedLevel = 2; // 0=walk, 1=trot, 2=canter, 3=gallop
+static const wchar_t* g_navSpeedNames[] = { L"Walk", L"Trot", L"Canter", L"Gallop" };
+static const float g_navSpeedValues[] = { 1.0f, 1.8f, 2.5f, 3.5f };
+static bool g_navToTargetActive = false;
+static float g_navTargetX = 0.0f;
+static float g_navTargetY = 0.0f;
+static float g_navTargetZ = 0.0f;
+static wchar_t g_navTargetName[128] = L"";
+struct NavPOI { float x; float y; float z; const wchar_t* name; const wchar_t* type; };
+static const NavPOI g_navPOIs[] = {
+	// Valentine
+	{ -179.0f, 649.0f, 114.0f, L"Valentine", L"Town" },
+	{ -164.0f, 625.0f, 114.0f, L"Valentine Saloon", L"Saloon" },
+	{ -192.0f, 651.0f, 114.0f, L"Valentine General Store", L"Store" },
+	{ -174.0f, 635.0f, 114.0f, L"Valentine Gunsmith", L"Gunsmith" },
+	{ -193.0f, 593.0f, 114.0f, L"Valentine Doctor", L"Doctor" },
+	{ -142.0f, 615.0f, 114.0f, L"Valentine Stable", L"Stable" },
+	{ -218.0f, 659.0f, 114.0f, L"Valentine Hotel", L"Hotel" },
+	// Blackwater
+	{ -814.0f, -1282.0f, 43.0f, L"Blackwater", L"Town" },
+	{ -793.0f, -1311.0f, 43.0f, L"Blackwater Saloon", L"Saloon" },
+	{ -838.0f, -1302.0f, 43.0f, L"Blackwater Gunsmith", L"Gunsmith" },
+	{ -867.0f, -1281.0f, 43.0f, L"Blackwater General Store", L"Store" },
+	{ -773.0f, -1256.0f, 43.0f, L"Blackwater Stable", L"Stable" },
+	// Saint Denis
+	{ 2432.0f, -1208.0f, 46.0f, L"Saint Denis", L"Town" },
+	{ 2504.0f, -1306.0f, 46.0f, L"Saint Denis Gunsmith", L"Gunsmith" },
+	{ 2558.0f, -1163.0f, 46.0f, L"Saint Denis General Store", L"Store" },
+	{ 2552.0f, -1285.0f, 46.0f, L"Saint Denis Doctor", L"Doctor" },
+	{ 2475.0f, -1103.0f, 46.0f, L"Saint Denis Stable", L"Stable" },
+	{ 2454.0f, -1246.0f, 46.0f, L"Saint Denis Saloon", L"Saloon" },
+	{ 2644.0f, -1181.0f, 46.0f, L"Saint Denis Trapper", L"Trapper" },
+	{ 2567.0f, -1232.0f, 46.0f, L"Saint Denis Tailor", L"Tailor" },
+	// Rhodes
+	{ 1302.0f, -1286.0f, 75.0f, L"Rhodes", L"Town" },
+	{ 1281.0f, -1303.0f, 77.0f, L"Rhodes Gunsmith", L"Gunsmith" },
+	{ 1321.0f, -1296.0f, 76.0f, L"Rhodes General Store", L"Store" },
+	{ 1309.0f, -1238.0f, 75.0f, L"Rhodes Saloon", L"Saloon" },
+	{ 1343.0f, -1326.0f, 73.0f, L"Rhodes Stable", L"Stable" },
+	// Strawberry
+	{ -1791.0f, -384.0f, 160.0f, L"Strawberry", L"Town" },
+	{ -1755.0f, -403.0f, 159.0f, L"Strawberry General Store", L"Store" },
+	{ -1794.0f, -394.0f, 160.0f, L"Strawberry Welcome Center", L"Service" },
+	// Annesburg
+	{ 2929.0f, 1274.0f, 44.0f, L"Annesburg", L"Town" },
+	{ 2929.0f, 1307.0f, 44.0f, L"Annesburg Gunsmith", L"Gunsmith" },
+	// Van Horn
+	{ 2994.0f, 508.0f, 45.0f, L"Van Horn", L"Town" },
+	// Armadillo
+	{ -3659.0f, -2599.0f, -14.0f, L"Armadillo", L"Town" },
+	{ -3658.0f, -2613.0f, -14.0f, L"Armadillo General Store", L"Store" },
+	{ -3689.0f, -2648.0f, -14.0f, L"Armadillo Saloon", L"Saloon" },
+	// Tumbleweed
+	{ -5411.0f, -2930.0f, -1.0f, L"Tumbleweed", L"Town" },
+	{ -5508.0f, -2938.0f, -1.0f, L"Tumbleweed Gunsmith", L"Gunsmith" },
+	// Activities
+	{ -268.0f, 760.0f, 118.0f, L"Flatneck Station Poker", L"Poker" },
+	{ -164.0f, 625.0f, 114.0f, L"Valentine Poker", L"Poker" },
+	{ -793.0f, -1311.0f, 43.0f, L"Blackwater Poker", L"Poker" },
+	{ 2454.0f, -1246.0f, 46.0f, L"Saint Denis Poker", L"Poker" },
+	// Key Locations
+	{ -1612.0f, -1095.0f, 83.0f, L"Beechers Hope", L"Home" },
+	{ 1544.0f, 291.0f, 87.0f, L"Emerald Ranch", L"Ranch" },
+	{ 2162.0f, -648.0f, 42.0f, L"Lagras", L"Settlement" },
+	{ -1350.0f, 530.0f, 96.0f, L"Wallace Station", L"Station" },
+	{ -182.0f, 757.0f, 118.0f, L"Flatneck Station", L"Station" },
+	{ 2464.0f, 1052.0f, 43.0f, L"Butcher Creek", L"Settlement" },
+	{ -268.0f, 782.0f, 118.0f, L"Horseshoe Overlook Camp", L"Camp" },
+	// Trappers
+	{ -4612.0f, -2728.0f, -4.0f, L"Riggs Station Trapper", L"Trapper" },
+};
+static const int g_numNavPOIs = sizeof(g_navPOIs) / sizeof(g_navPOIs[0]);
+static int g_navCurrentPOI = 0; // current index in POI list
+static int* g_navSortedIndices = nullptr; // sorted by distance
+static int g_navSortedCount = 0;
+
+// Strangers / Activities / Missions database
+struct NavMission { float x; float y; float z; const wchar_t* name; const wchar_t* type; };
+static const NavMission g_navMissions[] = {
+	// Chapter 2 Strangers
+	{ -304.0f, 771.0f, 119.0f, L"Brother Dorkins", L"Stranger" },
+	{ 1585.0f, 303.0f, 88.0f, L"The Veteran", L"Stranger" },
+	{ 2596.0f, -1403.0f, 42.0f, L"Sister Calderon", L"Stranger" },
+	{ -998.0f, -551.0f, 93.0f, L"Albert Mason Photographer", L"Stranger" },
+	{ 1485.0f, 366.0f, 89.0f, L"Hamish Sinclair", L"Stranger" },
+	{ 1287.0f, -1285.0f, 77.0f, L"Alden Train Clerk", L"Stranger" },
+	{ -1794.0f, -392.0f, 159.0f, L"Sheriff Hanley", L"Stranger" },
+	{ 1741.0f, -450.0f, 43.0f, L"Mary Linton", L"Stranger" },
+	{ 2429.0f, -1222.0f, 46.0f, L"Penelope Braithwaite", L"Stranger" },
+	{ -352.0f, 765.0f, 116.0f, L"Deborah MacGuiness", L"Stranger" },
+	{ 2946.0f, 518.0f, 44.0f, L"The Inventor", L"Stranger" },
+	{ 2456.0f, -1073.0f, 46.0f, L"Dorothea Wicklow", L"Stranger" },
+	{ -1192.0f, -566.0f, 100.0f, L"Charles Chatenay", L"Stranger" },
+	{ 2555.0f, -1224.0f, 46.0f, L"Algernon Wasp", L"Stranger" },
+	{ -166.0f, 640.0f, 114.0f, L"Jim Boy Calloway", L"Stranger" },
+	{ 980.0f, -164.0f, 74.0f, L"John Weathers", L"Stranger" },
+	// Activities
+	{ -268.0f, 760.0f, 118.0f, L"Flatneck Poker", L"Activity" },
+	{ -164.0f, 625.0f, 114.0f, L"Valentine Poker", L"Activity" },
+	{ -793.0f, -1311.0f, 43.0f, L"Blackwater Poker", L"Activity" },
+	{ 2454.0f, -1246.0f, 46.0f, L"Saint Denis Poker", L"Activity" },
+	{ 1309.0f, -1238.0f, 75.0f, L"Rhodes Poker", L"Activity" },
+	{ 1287.0f, -1365.0f, 75.0f, L"Rhodes Five Finger Fillet", L"Activity" },
+	{ -164.0f, 606.0f, 114.0f, L"Valentine Five Finger Fillet", L"Activity" },
+	{ 2932.0f, 1316.0f, 44.0f, L"Annesburg Dominoes", L"Activity" },
+	{ -1782.0f, -385.0f, 159.0f, L"Strawberry Dominoes", L"Activity" },
+	{ 2432.0f, -1275.0f, 46.0f, L"Saint Denis Dominoes", L"Activity" },
+	{ -814.0f, -1313.0f, 43.0f, L"Blackwater Dominoes", L"Activity" },
+	// Bounty Boards
+	{ -179.0f, 654.0f, 114.0f, L"Valentine Bounty Board", L"Bounty" },
+	{ 1302.0f, -1300.0f, 77.0f, L"Rhodes Bounty Board", L"Bounty" },
+	{ -1790.0f, -399.0f, 160.0f, L"Strawberry Bounty Board", L"Bounty" },
+	{ 2435.0f, -1242.0f, 46.0f, L"Saint Denis Bounty Board", L"Bounty" },
+	{ 2927.0f, 1303.0f, 44.0f, L"Annesburg Bounty Board", L"Bounty" },
+	// Hunting / Fishing
+	{ -1353.0f, 534.0f, 96.0f, L"Wallace Station Fishing", L"Fishing" },
+	{ -1612.0f, -1060.0f, 83.0f, L"Flat Iron Lake Fishing", L"Fishing" },
+	{ 1571.0f, 340.0f, 87.0f, L"Emerald Ranch Fishing", L"Fishing" },
+	// Robberies / Events
+	{ 1283.0f, -1344.0f, 73.0f, L"Rhodes Stage Coach Robbery", L"Robbery" },
+	{ 579.0f, 466.0f, 108.0f, L"Train Robbery (Bacchus Bridge)", L"Robbery" },
+};
+static const int g_numNavMissions = sizeof(g_navMissions) / sizeof(g_navMissions[0]);
+static int g_navCurrentMission = 0;
+static int* g_missionSortedIndices = nullptr;
+static int g_missionSortedCount = 0;
+static bool g_lastBrowsedMission = false; // true=mission list, false=POI list
+
+// =======================================
+// WEAPON NAME LOOKUP TABLE
+// =======================================
+struct WeaponNameEntry { Hash hash; const wchar_t* name; };
+static const WeaponNameEntry g_weaponNames[] = {
+	// Revolvers
+	{ 0x169F59F7, L"Cattleman Revolver" },
+	{ 0xF5175BA1, L"Double Action Revolver" },
+	{ 0xA77C3B93, L"Schofield Revolver" },
+	{ 0xEED88FDA, L"Navy Revolver" },
+	{ 0x7BBD1A30, L"LeMat Revolver" },
+	// Pistols
+	{ 0x7BBFC4A4, L"Mauser Pistol" },
+	{ 0x83DD5220, L"Semi-Auto Pistol" },
+	{ 0x657065F4, L"Volcanic Pistol" },
+	// Rifles
+	{ 0xA3B3F5F4, L"Springfield Rifle" },
+	{ 0x772C8DD6, L"Bolt Action Rifle" },
+	{ 0x63F46DE6, L"Varmint Rifle" },
+	{ 0x65B3C226, L"Rolling Block Rifle" },
+	{ 0xC734385A, L"Carcano Rifle" },
+	// Repeaters
+	{ 0xFB4D4D58, L"Carbine Repeater" },
+	{ 0xC8B8C13D, L"Lancaster Repeater" },
+	{ 0xA84B2E9A, L"Litchfield Repeater" },
+	{ 0xCA2B854C, L"Evans Repeater" },
+	// Shotguns
+	{ 0x63CE75C0, L"Double-barreled Shotgun" },
+	{ 0x31B7B9FE, L"Pump Shotgun" },
+	{ 0x7CE36CB0, L"Sawed-off Shotgun" },
+	{ 0x28950C71, L"Semi-Auto Shotgun" },
+	{ 0xEAF672B7, L"Repeating Shotgun" },
+	// Sniper
+	{ 0x65B3C226, L"Rolling Block Rifle" },
+	// Melee
+	{ 0xDB21AC8C, L"Knife" },
+	{ 0xF9DCBF2D, L"Machete" },
+	{ 0x58CFBE96, L"Hatchet" },
+	{ 0x12CB1839, L"Tomahawk" },
+	// Thrown
+	{ 0x5B78DAD4, L"Dynamite" },
+	{ 0x7067E7A7, L"Fire Bottle" },
+	{ 0x787F1B5C, L"Fire Bottle" },
+	{ 0x2320496A, L"Throwing Knife" },
+	{ 0xF92CDD67, L"Throwing Knife" },
+	{ 0x21E70A35, L"Throwing Knife" },
+	// Bow/Lasso
+	{ 0x88A8505C, L"Bow" },
+	{ 0x4007B858, L"Lasso" },
+	// Unarmed  
+	{ 0xD3BD8255, L"Unarmed" },
+	{ 0, nullptr }
 };
 
-static MenuBase* CreateGuardSquadsMenu(MenuController* controller)
-{
-	auto menu = new MenuBase(new MenuItemListTitle("SQUADS"));
-	controller->RegisterMenu(menu);
-	// Create squad: add empty squad and select it
-	class MenuItemCreateSquad : public MenuItemDefault { public: MenuItemCreateSquad():MenuItemDefault("Create squad"){}; void OnSelect() override {
-		if ((int)g_squads.size() >= g_maxSquads) { A11y::speak(L"max squads", true); return; }
-		g_squads.push_back(Squad{}); g_activeSquad = (int)g_squads.size()-1; wchar_t buf[64]; swprintf_s(buf, L"squad %d created", g_activeSquad+1); A11y::speak(buf, true);
-	}}; menu->AddItem(new MenuItemCreateSquad());
-	// Dismiss squad: remove current squad
-	class MenuItemDismissSquad : public MenuItemDefault { public: MenuItemDismissSquad():MenuItemDefault("Dismiss squad"){}; void OnSelect() override {
-		if (g_activeSquad < 0 || g_activeSquad >= (int)g_squads.size()) { A11y::speak(L"no squad", true); return; }
-		int idx = g_activeSquad;
-		// release spawned guards and their horses if any
-		for (auto &gi : g_squads[idx].guards) { if (gi.horse) ReleaseHorse(gi.horse); ReleaseGuard(gi.ped); }
-		g_squads.erase(g_squads.begin()+idx);
-		if (g_squads.empty()) g_activeSquad = -1; else if (idx >= (int)g_squads.size()) g_activeSquad = (int)g_squads.size()-1; else g_activeSquad = idx;
-		A11y::speak(L"squad dismissed", true);
-	}}; menu->AddItem(new MenuItemDismissSquad());
-	// Squad size: speak current size
-	class MenuItemSquadSize : public MenuItemDefault { public: MenuItemSquadSize():MenuItemDefault("Squad size"){}; void OnSelect() override {
-		int sz = 0; if (g_activeSquad >= 0 && g_activeSquad < (int)g_squads.size()) sz = (int)g_squads[g_activeSquad].guards.size();
-		wchar_t buf[64]; swprintf_s(buf, L"squad size %d", sz); A11y::speak(buf, true);
-	}}; menu->AddItem(new MenuItemSquadSize());
-	return menu;
+static const wchar_t* GetWeaponName(Hash weaponHash) {
+	// Try game's label system first to get localized/correct names
+	const char* label = invoke<const char*>(0xBD5DD5EAE2B6CE14, weaponHash); // GET_STRING_FROM_HASH_KEY
+	if (label && label[0] != '\0' && strcmp(label, "NULL") != 0) {
+		const char* text = label;
+		if (UI::DOES_TEXT_LABEL_EXIST(const_cast<char*>(label))) {
+			text = UI::_GET_LABEL_TEXT(const_cast<char*>(label));
+		}
+		if (text && text[0] != '\0') {
+			static wchar_t wbuf[128];
+			MultiByteToWideChar(CP_UTF8, 0, text, -1, wbuf, 128);
+			return wbuf;
+		}
+	}
+	// Fallback to hardcoded table lookup
+	for (int i = 0; g_weaponNames[i].name != nullptr; i++) {
+		if (g_weaponNames[i].hash == weaponHash) return g_weaponNames[i].name;
+	}
+	return L"Unknown weapon";
 }
 
-static MenuBase* CreateGuardRosterMenu(MenuController* controller)
-{
-	auto menu = new MenuBase(new MenuItemListTitle("GUARDS"));
-	controller->RegisterMenu(menu);
-	// Select next squad
-	class MenuItemSelectSquad : public MenuItemDefault { public: MenuItemSelectSquad():MenuItemDefault("Select next squad"){}; void OnSelect() override {
-		if (g_squads.empty()) { A11y::speak(L"no squads", true); return; }
-		if (g_activeSquad < 0) g_activeSquad = 0; else g_activeSquad = (g_activeSquad + 1) % (int)g_squads.size();
-		wchar_t buf[64]; swprintf_s(buf, L"squad %d", g_activeSquad+1); A11y::speak(buf, true);
-	}}; menu->AddItem(new MenuItemSelectSquad());
-	// Add guard: spawn and attach to active squad
-	class MenuItemAddGuard : public MenuItemDefault { public: MenuItemAddGuard():MenuItemDefault("Add guard"){}; void OnSelect() override {
-		if (g_activeSquad < 0 || g_activeSquad >= (int)g_squads.size()) { A11y::speak(L"no squad", true); return; }
-		Hash model = GAMEPLAY::GET_HASH_KEY("S_M_M_CORNWALLGUARD_01");
-		Hash weapon = GAMEPLAY::GET_HASH_KEY("WEAPON_REPEATER_CARBINE");
-		float offs[][2] = { { -0.6f, -1.6f }, { 0.6f, -1.8f }, { -1.2f, -2.0f }, { 1.2f, -2.2f }, { 0.0f, -2.4f } };
-		int slot = (int)g_squads[g_activeSquad].guards.size(); if (slot < 0) slot = 0; if (slot > 4) slot = 4;
-		Ped p = SpawnGuardNearPlayer(model, weapon, offs[slot][0], offs[slot][1]);
-		if (!p) { A11y::speak(L"spawn failed", true); return; }
-		GuardInfo gi; gi.ped = p; gi.horse = 0; gi.mounted = false;
-		// Auto-spawn an Arabian horse for this guard and have it follow the owner until mounted
-		Ped h = SpawnArabianHorseNearPed(p, slot % 3);
-		if (h) {
-			gi.horse = h;
-			// Encourage immediate mount: stop horse briefly and bring rider close
-			Vector3 hpos = ENTITY::GET_ENTITY_COORDS(h, TRUE, FALSE);
-			AI::TASK_STAND_STILL(h, 2500);
-			AI::TASK_GO_TO_COORD_ANY_MEANS(p, hpos.x, hpos.y, hpos.z, 2.6f, 0, FALSE, 0, 0.0f);
+static bool IsPedHorse(Ped ped) {
+	if (!ENTITY::DOES_ENTITY_EXIST(ped) || ENTITY::IS_ENTITY_DEAD(ped)) return false;
+	Hash model = ENTITY::GET_ENTITY_MODEL(ped);
+	for (int i = 0; i < ARRAY_LENGTH(pedModelInfos); i++) {
+		if (GAMEPLAY::GET_HASH_KEY(const_cast<char*>(pedModelInfos[i].model.c_str())) == model) {
+			return pedModelInfos[i].horse;
 		}
-		g_squads[g_activeSquad].guards.push_back(gi);
-		// Default squad order to Patrol when first guards exist
-		g_activeSquadOrder = SquadOrder::Patrol;
-		wchar_t buf[64]; swprintf_s(buf, L"guard %d", (int)g_squads[g_activeSquad].guards.size()); A11y::speak(buf, true);
-	}}; menu->AddItem(new MenuItemAddGuard());
-	// Remove guard: pop last and release
-	class MenuItemRemoveGuard : public MenuItemDefault { public: MenuItemRemoveGuard():MenuItemDefault("Remove guard"){}; void OnSelect() override {
-		if (g_activeSquad < 0 || g_activeSquad >= (int)g_squads.size()) { A11y::speak(L"no squad", true); return; }
-		auto &sq = g_squads[g_activeSquad]; if (sq.guards.empty()) { A11y::speak(L"no guards", true); return; }
-		GuardInfo gi = sq.guards.back(); if (gi.horse) ReleaseHorse(gi.horse); ReleaseGuard(gi.ped); sq.guards.pop_back(); A11y::speak(L"guard removed", true);
-	}}; menu->AddItem(new MenuItemRemoveGuard());
-	// Status: speak which squad is active
-	class MenuItemRosterStatus : public MenuItemDefault { public: MenuItemRosterStatus():MenuItemDefault("Active squad status"){}; void OnSelect() override {
-		if (g_activeSquad < 0 || g_activeSquad >= (int)g_squads.size()) { A11y::speak(L"no squad", true); return; }
-		int sz = (int)g_squads[g_activeSquad].guards.size(); wchar_t buf[64]; swprintf_s(buf, L"squad %d, %d guards", g_activeSquad+1, sz); A11y::speak(buf, true);
-	}}; menu->AddItem(new MenuItemRosterStatus());
-	return menu;
+	}
+	return false;
 }
 
-static MenuBase* CreateGuardWeaponsMenu(MenuController* controller)
-{
-	auto menu = new MenuBase(new MenuItemListTitle("WEAPONS"));
-	controller->RegisterMenu(menu);
-
-	// Helper to arm a guard respecting global toggles
-	auto ArmGuardWith = [](Ped p, Hash weaponHash) {
-		if (!p || !ENTITY::DOES_ENTITY_EXIST(p)) return;
-		WEAPON::GIVE_DELAYED_WEAPON_TO_PED(p, weaponHash, 120, 1, 0x2cd419dc);
-		WEAPON::SET_CURRENT_PED_WEAPON(p, weaponHash, 1, 0, 0, 0);
-		if (g_guardsInfiniteAmmo) {
-			WEAPON::SET_PED_INFINITE_AMMO(p, TRUE, 0);
-		}
-		// No per-clip adjustments for now (stability)
-	};
-
-	class MenuItemEquipPreset : public MenuItemDefault {
-		Hash m_weapon;
-		std::wstring m_announce;
-		decltype(ArmGuardWith) m_armFn;
-	public:
-		MenuItemEquipPreset(std::string caption, Hash weapon, const std::wstring &announce, decltype(ArmGuardWith) armFn)
-			: MenuItemDefault(caption), m_weapon(weapon), m_announce(announce), m_armFn(armFn) {}
-		void OnSelect() override {
-			if (g_activeSquad < 0 || g_activeSquad >= (int)g_squads.size()) { A11y::speak(L"no squad", true); return; }
-			int applied = 0;
-			auto &sq = g_squads[g_activeSquad];
-			for (auto &gi : sq.guards) {
-				Ped p = gi.ped; if (!p || !ENTITY::DOES_ENTITY_EXIST(p)) continue;
-				m_armFn(p, m_weapon); applied++;
+static Ped GetPlayerHorse(Ped playerPed) {
+	if (!ENTITY::DOES_ENTITY_EXIST(playerPed)) return 0;
+	Ped horse = invoke<Ped>(0x4C8B59171957BCF7, playerPed); // _GET_LAST_MOUNT
+	if (horse && ENTITY::DOES_ENTITY_EXIST(horse) && !ENTITY::IS_ENTITY_DEAD(horse)) {
+		return horse;
+	}
+	// Fallback: scan world for the nearest horse that belongs to the player
+	int peds[1024];
+	int count = worldGetAllPeds(peds, 1024);
+	float bestDist = 300.0f; // max whistle range
+	Ped bestHorse = 0;
+	Vector3 pPos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
+	for (int i = 0; i < count; i++) {
+		Ped p = peds[i];
+		if (p && p != playerPed && ENTITY::DOES_ENTITY_EXIST(p) && !ENTITY::IS_ENTITY_DEAD(p)) {
+			if (IsPedHorse(p)) {
+				// Check if this horse belongs to the player (bonding level > 0, or currently ridden)
+				int bondLevel = invoke<int>(0x454AD4DA6C41B5BD, p); // _GET_MOUNT_BONDING_LEVEL
+				bool isCurrentMount = (p == PED::GET_MOUNT(playerPed));
+				if (bondLevel > 0 || isCurrentMount) {
+					Vector3 hPos = ENTITY::GET_ENTITY_COORDS(p, TRUE, FALSE);
+					float dist = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(pPos.x, pPos.y, pPos.z, hPos.x, hPos.y, hPos.z, TRUE);
+					if (dist < bestDist) {
+						bestDist = dist;
+						bestHorse = p;
+					}
+				}
 			}
-			if (!m_announce.empty()) A11y::speak(m_announce, true);
-			wchar_t buf[64]; swprintf_s(buf, L"equipped %d guards", applied); A11y::speak(buf, false);
 		}
-	};
-
-	// Weapon presets (strong defaults)
-	Hash wRepeater   = GAMEPLAY::GET_HASH_KEY("WEAPON_REPEATER_CARBINE");
-	Hash wShotgun    = GAMEPLAY::GET_HASH_KEY("WEAPON_SHOTGUN_DOUBLEBARREL");
-	Hash wSniper     = GAMEPLAY::GET_HASH_KEY("WEAPON_SNIPERRIFLE_CARCANO");
-	Hash wMeleeKnife = GAMEPLAY::GET_HASH_KEY("WEAPON_MELEE_KNIFE");
-
-	menu->AddItem(new MenuItemEquipPreset("Preset: rifleman", wRepeater, L"riflemen", ArmGuardWith));
-	menu->AddItem(new MenuItemEquipPreset("Preset: shotgunner", wShotgun, L"shotgunners", ArmGuardWith));
-	menu->AddItem(new MenuItemEquipPreset("Preset: sniper", wSniper, L"snipers", ArmGuardWith));
-	menu->AddItem(new MenuItemEquipPreset("Preset: melee", wMeleeKnife, L"melee", ArmGuardWith));
-
-	// Global toggles for all guards
-	class MenuItemGuardsInfiniteAmmo : public MenuItemSwitchable {
-		virtual void OnSelect() override {
-			bool ns = !GetState(); SetState(ns); g_guardsInfiniteAmmo = ns;
-			// Apply immediately to existing guards
-			for (auto &sq : g_squads) for (auto &gi : sq.guards) {
-				Ped p = gi.ped; if (!p || !ENTITY::DOES_ENTITY_EXIST(p)) continue;
-				WEAPON::SET_PED_INFINITE_AMMO(p, ns ? TRUE : FALSE, 0);
-			}
-			A11y::speak(ns ? L"infinite ammo on" : L"infinite ammo off", true);
-		}
-	public:
-		MenuItemGuardsInfiniteAmmo(std::string caption) : MenuItemSwitchable(caption) { SetState(g_guardsInfiniteAmmo); }
-	};
-
-	class MenuItemGuardsNoReload : public MenuItemSwitchable {
-		virtual void OnSelect() override {
-			bool ns = !GetState(); SetState(ns); g_guardsNoReload = ns;
-			A11y::speak(ns ? L"no reload on" : L"no reload off", true);
-		}
-	public:
-		MenuItemGuardsNoReload(std::string caption) : MenuItemSwitchable(caption) { SetState(g_guardsNoReload); }
-	};
-
-	menu->AddItem(new MenuItemGuardsInfiniteAmmo("Infinite ammo (guards)"));
-	menu->AddItem(new MenuItemGuardsNoReload("No reload (guards)"));
-
-	// Keep placeholder for future custom per-guard loadouts
-	menu->AddItem(new MenuItemSpeakOnSelect("Custom loadout", L"custom loadout"));
-	return menu;
+	}
+	return bestHorse;
 }
 
-static MenuBase* CreateGuardMountsMenu(MenuController* controller)
-{
-	auto menu = new MenuBase(new MenuItemListTitle("MOUNTS"));
-	// Give Arabian horses to each guard in the active squad
-	class MenuItemGiveHorses : public MenuItemDefault { public: MenuItemGiveHorses():MenuItemDefault("Give horses"){}; void OnSelect() override {
-		if (g_activeSquad < 0 || g_activeSquad >= (int)g_squads.size()) { A11y::speak(L"no squad", true); return; }
-		auto &sq = g_squads[g_activeSquad]; if (sq.guards.empty()) { A11y::speak(L"no guards", true); return; }
-		int given = 0; int variant = 0;
-		for (auto &gi : sq.guards) {
-			if (!gi.ped || !ENTITY::DOES_ENTITY_EXIST(gi.ped)) continue;
-			if (gi.horse && ENTITY::DOES_ENTITY_EXIST(gi.horse)) { // refresh follow task
-				AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(gi.horse, gi.ped, -1.5f, -1.0f, 0.0f, 2.2f, -1, 1.5f, TRUE, FALSE, FALSE, FALSE, FALSE);
-				continue;
-			}
-			Ped h = SpawnArabianHorseNearPed(gi.ped, variant++);
-			if (h) { gi.horse = h; gi.mounted = false; ++given; }
+// =======================================
+// HORSE BREED NAME LOOKUP TABLE
+// =======================================
+struct HorseNameEntry { const char* model; const wchar_t* name; };
+static const HorseNameEntry g_horseNames[] = {
+	// Arabians
+	{ "A_C_Horse_Arabian_Black", L"Black Arabian" },
+	{ "A_C_Horse_Arabian_Grey", L"Grey Arabian" },
+	{ "A_C_Horse_Arabian_White", L"White Arabian" },
+	{ "A_C_Horse_Arabian_RoseGreyBay", L"Rose Grey Bay Arabian" },
+	// Turkoman
+	{ "A_C_Horse_Turkoman_DarkBay", L"Dark Bay Turkoman" },
+	{ "A_C_Horse_Turkoman_Gold", L"Gold Turkoman" },
+	{ "A_C_Horse_Turkoman_Silver", L"Silver Turkoman" },
+	{ "A_C_Horse_Turkoman_GoldPalomino", L"Gold Palomino Turkoman" },
+	// Missouri Fox Trotter
+	{ "A_C_Horse_MissouriFoxTrotter_AmberChampagne", L"Amber Champagne Missouri Fox Trotter" },
+	{ "A_C_Horse_MissouriFoxTrotter_SableChampagne", L"Sable Champagne Missouri Fox Trotter" },
+	// Thoroughbred
+	{ "A_C_Horse_Thoroughbred_BlackChestnut", L"Black Chestnut Thoroughbred" },
+	{ "A_C_Horse_Thoroughbred_BloodBay", L"Blood Bay Thoroughbred" },
+	{ "A_C_Horse_Thoroughbred_Brindle", L"Brindle Thoroughbred" },
+	{ "A_C_Horse_Thoroughbred_DappleGrey", L"Dapple Grey Thoroughbred" },
+	// American Standardbred
+	{ "A_C_Horse_AmericanStandardbred_Black", L"Black American Standardbred" },
+	{ "A_C_Horse_AmericanStandardbred_Buckskin", L"Buckskin American Standardbred" },
+	{ "A_C_Horse_AmericanStandardbred_PalominoDapple", L"Palomino Dapple American Standardbred" },
+	// American Paint
+	{ "A_C_Horse_AmericanPaint_Greyovero", L"Grey Overo American Paint" },
+	{ "A_C_Horse_AmericanPaint_Overo", L"Overo American Paint" },
+	{ "A_C_Horse_AmericanPaint_SplashedWhite", L"Splashed White American Paint" },
+	{ "A_C_Horse_AmericanPaint_Tobiano", L"Tobiano American Paint" },
+	// Appaloosa
+	{ "A_C_Horse_Appaloosa_BlackSnowflake", L"Black Snowflake Appaloosa" },
+	{ "A_C_Horse_Appaloosa_Blanket", L"Blanket Appaloosa" },
+	{ "A_C_Horse_Appaloosa_BrownLeopard", L"Brown Leopard Appaloosa" },
+	{ "A_C_Horse_Appaloosa_FewSpotted_PC", L"Few Spotted Appaloosa" },
+	{ "A_C_Horse_Appaloosa_Leopard", L"Leopard Appaloosa" },
+	{ "A_C_Horse_Appaloosa_LeopardBlanket", L"Leopard Blanket Appaloosa" },
+	// Hungarian Halfbred
+	{ "A_C_Horse_HungarianHalfbred_DarkDappleGrey", L"Dark Dapple Grey Hungarian Halfbred" },
+	{ "A_C_Horse_HungarianHalfbred_FlaxenChestnut", L"Flaxen Chestnut Hungarian Halfbred" },
+	{ "A_C_Horse_HungarianHalfbred_LiverChestnut", L"Liver Chestnut Hungarian Halfbred" },
+	{ "A_C_Horse_HungarianHalfbred_PiebaldTobiano", L"Piebald Tobiano Hungarian Halfbred" },
+	// Dutch Warmblood
+	{ "A_C_Horse_DutchWarmblood_ChocolateRoan", L"Chocolate Roan Dutch Warmblood" },
+	{ "A_C_Horse_DutchWarmblood_SealBrown", L"Seal Brown Dutch Warmblood" },
+	{ "A_C_Horse_DutchWarmblood_SootyBuckskin", L"Sooty Buckskin Dutch Warmblood" },
+	// Tennessee Walker
+	{ "A_C_Horse_TennesseeWalker_BlackRabicano", L"Black Rabicano Tennessee Walker" },
+	{ "A_C_Horse_TennesseeWalker_Chestnut", L"Chestnut Tennessee Walker" },
+	{ "A_C_Horse_TennesseeWalker_DappleBay", L"Dapple Bay Tennessee Walker" },
+	{ "A_C_Horse_TennesseeWalker_FlaxenRoan", L"Flaxen Roan Tennessee Walker" },
+	{ "A_C_Horse_TennesseeWalker_MahoganyBay", L"Mahogany Bay Tennessee Walker" },
+	{ "A_C_Horse_TennesseeWalker_RedRoan", L"Red Roan Tennessee Walker" },
+	// Morgan
+	{ "A_C_Horse_Morgan_Bay", L"Bay Morgan" },
+	{ "A_C_Horse_Morgan_BayRoan", L"Bay Roan Morgan" },
+	{ "A_C_Horse_Morgan_FlaxenChestnut", L"Flaxen Chestnut Morgan" },
+	{ "A_C_Horse_Morgan_LiverChestnut_PC", L"Liver Chestnut Morgan" },
+	{ "A_C_Horse_Morgan_Palomino", L"Palomino Morgan" },
+	// Kentucky Saddler
+	{ "A_C_Horse_KentuckySaddle_Black", L"Black Kentucky Saddler" },
+	{ "A_C_Horse_KentuckySaddle_ButterMilkBuckskin", L"Buttermilk Buckskin Kentucky Saddler" },
+	{ "A_C_Horse_KentuckySaddle_ChestnutPinto", L"Chestnut Pinto Kentucky Saddler" },
+	{ "A_C_Horse_KentuckySaddle_Grey", L"Grey Kentucky Saddler" },
+	{ "A_C_Horse_KentuckySaddle_SilverBay", L"Silver Bay Kentucky Saddler" },
+	// Nokota
+	{ "A_C_Horse_Nokota_BlueRoan", L"Blue Roan Nokota" },
+	{ "A_C_Horse_Nokota_ReverseDappleRoan", L"Reverse Dapple Roan Nokota" },
+	{ "A_C_Horse_Nokota_WhiteRoan", L"White Roan Nokota" },
+	// Shire
+	{ "A_C_Horse_Shire_DarkBay", L"Dark Bay Shire" },
+	{ "A_C_Horse_Shire_LightGrey", L"Light Grey Shire" },
+	{ "A_C_Horse_Shire_RavenBlack", L"Raven Black Shire" },
+	// Suffolk Punch
+	{ "A_C_Horse_SuffolkPunch_RedChestnut", L"Red Chestnut Suffolk Punch" },
+	{ "A_C_Horse_SuffolkPunch_Sorrel", L"Sorrel Suffolk Punch" },
+	// Mustang
+	{ "A_C_Horse_Mustang_GoldenDun", L"Golden Dun Mustang" },
+	{ "A_C_Horse_Mustang_GrulloDun", L"Grullo Dun Mustang" },
+	{ "A_C_Horse_Mustang_TigerStripedBay", L"Tiger Striped Bay Mustang" },
+	{ "A_C_Horse_Mustang_WildBay", L"Wild Bay Mustang" },
+	// Belgian
+	{ "A_C_Horse_Belgian_BlondChestnut", L"Blond Chestnut Belgian" },
+	{ "A_C_Horse_Belgian_MealyChestnut", L"Mealy Chestnut Belgian" },
+	// Ardennes
+	{ "A_C_Horse_Ardennes_BayRoan", L"Bay Roan Ardennes" },
+	{ "A_C_Horse_Ardennes_IronGreyRoan", L"Iron Grey Roan Ardennes" },
+	{ "A_C_Horse_Ardennes_StrawberryRoan", L"Strawberry Roan Ardennes" },
+	{ nullptr, nullptr }
+};
+
+static const wchar_t* GetHorseName(Hash modelHash) {
+	for (int i = 0; g_horseNames[i].model != nullptr; i++) {
+		if (GAMEPLAY::GET_HASH_KEY(const_cast<char*>(g_horseNames[i].model)) == modelHash)
+			return g_horseNames[i].name;
+	}
+	// Fallback: try game's label system
+	const char* label = invoke<const char*>(0xBD5DD5EAE2B6CE14, modelHash);
+	if (label && label[0] != '\0' && strcmp(label, "NULL") != 0) {
+		static wchar_t wbuf[128];
+		MultiByteToWideChar(CP_UTF8, 0, label, -1, wbuf, 128);
+		return wbuf;
+	}
+	return L"Unknown horse";
+}
+
+// =======================================
+// NUMPAD MODE SWITCHING SYSTEM
+// =======================================
+enum class NumpadMode { Bodyguard = 0, Global = 1, Horse = 2, Navigation = 3 };
+static NumpadMode g_currentNumpadMode = NumpadMode::Bodyguard;
+static const wchar_t* GetModeName(NumpadMode m) {
+	switch (m) {
+		case NumpadMode::Bodyguard:  return L"Bodyguard mode";
+		case NumpadMode::Global:     return L"Global mode";
+		case NumpadMode::Horse:      return L"Horse mode";
+		case NumpadMode::Navigation: return L"Navigation mode";
+		default: return L"Unknown";
+	}
+}
+
+// --- Formation offset calculation ---
+static inline void GetFormationOffset(int idx, GuardFormation form, bool mounted, float &outX, float &outY) {
+	const float stepBack = mounted ? 4.0f : 2.8f;
+	const float lateral = mounted ? 2.6f : 1.8f;
+	switch (form) {
+		case GuardFormation::Column:
+			outX = 0.0f; outY = -(2.0f + stepBack * (idx + 1));
+			break;
+		case GuardFormation::Line: {
+			int side = (idx % 2 == 0) ? -1 : 1;
+			int rank = (idx / 2);
+			outX = side * (lateral * (rank + 1));
+			outY = -(3.5f + (mounted ? 2.0f : 1.2f));
+			break;
 		}
-		wchar_t buf[64]; swprintf_s(buf, L"%d horses", given); A11y::speak(buf, true);
-	}}; menu->AddItem(new MenuItemGiveHorses());
+		case GuardFormation::Wedge: default: {
+			int row = 0; int count = 0;
+			while (count + (row + 1) <= idx) { count += (row + 1); ++row; }
+			int posInRow = idx - count;
+			float baseBack = 3.5f + row * stepBack;
+			float startX = -(row * 0.5f) * lateral;
+			outX = startX + posInRow * lateral;
+			outY = -baseBack;
+			break;
+		}
+	}
+}
 
-	// Remove horses from each guard (release them)
-	class MenuItemRemoveHorses : public MenuItemDefault { public: MenuItemRemoveHorses():MenuItemDefault("Remove horses"){}; void OnSelect() override {
-		if (g_activeSquad < 0 || g_activeSquad >= (int)g_squads.size()) { A11y::speak(L"no squad", true); return; }
-		auto &sq = g_squads[g_activeSquad]; if (sq.guards.empty()) { A11y::speak(L"no guards", true); return; }
-		int removed = 0;
-		for (auto &gi : sq.guards) { if (gi.horse) { ReleaseHorse(gi.horse); gi.horse = 0; gi.mounted = false; ++removed; } }
-		wchar_t buf[64]; swprintf_s(buf, L"%d removed", removed); A11y::speak(buf, true);
-	}}; menu->AddItem(new MenuItemRemoveHorses());
+// --- Follow command helper ---
+static inline void CommandGuardFollowOffset(const GuardInfo &gi, Ped player, float offX, float offY) {
+	if (!gi.ped || !ENTITY::DOES_ENTITY_EXIST(gi.ped)) return;
+	bool isMounted = PED::IS_PED_ON_MOUNT(gi.ped) ? true : false;
+	if (isMounted && gi.horse && ENTITY::DOES_ENTITY_EXIST(gi.horse)) {
+		// Use gallop speed (3.5f) so mounted guards keep up with player
+		AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(gi.horse, player, offX, offY, 0.0f, 3.5f, -1, 1.8f, TRUE, FALSE, FALSE, FALSE, FALSE);
+	} else {
+		AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(gi.ped, player, offX, offY, 0.0f, 2.6f, -1, 1.6f, TRUE, FALSE, FALSE, FALSE, FALSE);
+	}
+}
 
-	// Mount or dismount all guards that have horses
-	class MenuItemMountDismount : public MenuItemDefault { public: MenuItemMountDismount():MenuItemDefault("Mount / dismount"){}; void OnSelect() override {
-		if (g_activeSquad < 0 || g_activeSquad >= (int)g_squads.size()) { A11y::speak(L"no squad", true); return; }
-		auto &sq = g_squads[g_activeSquad]; if (sq.guards.empty()) { A11y::speak(L"no guards", true); return; }
-		int toggled = 0;
-		for (auto &gi : sq.guards) {
-			if (!gi.ped || !gi.horse) continue;
-			if (!ENTITY::DOES_ENTITY_EXIST(gi.ped) || !ENTITY::DOES_ENTITY_EXIST(gi.horse)) continue;
-			bool on = PED::IS_PED_ON_MOUNT(gi.ped) ? true : false;
-			if (!on) {
-				// No explicit mount native in our headers; guide ped onto horse using task and proximity
-				AI::TASK_CLEAR_LOOK_AT(gi.ped);
-				// Walk to the horse and try to mount via contextual use
-				Vector3 hpos = ENTITY::GET_ENTITY_COORDS(gi.horse, TRUE, FALSE);
-				AI::TASK_GO_TO_COORD_ANY_MEANS(gi.ped, hpos.x, hpos.y, hpos.z, 2.0f, 0, FALSE, 0, 0.0f);
-				// Encourage association by following/stand still on horse
-				AI::TASK_STAND_STILL(gi.horse, 3000);
+// --- Check if a ped is one of our guards ---
+static bool IsOurGuard(Ped p) {
+	for (const auto &sq : g_squads) {
+		for (const auto &gi : sq.guards) {
+			if (gi.ped == p || gi.horse == p) return true;
+		}
+	}
+	return false;
+}
+
+// --- Cleanup dead guards from active squad ---
+static void CleanupDeadGuards() {
+	if (g_activeSquad < 0 || g_activeSquad >= (int)g_squads.size()) return;
+	auto &guards = g_squads[g_activeSquad].guards;
+	for (int i = (int)guards.size() - 1; i >= 0; --i) {
+		if (!guards[i].ped || !ENTITY::DOES_ENTITY_EXIST(guards[i].ped) || ENTITY::IS_ENTITY_DEAD(guards[i].ped)) {
+			guards.erase(guards.begin() + i);
+		}
+	}
+}
+
+static int GetTotalGuardCount();
+
+// --- Spawn a guard into the active squad ---
+static bool SpawnGuard(const string &pedModel) {
+	Ped playerPed = PLAYER::PLAYER_PED_ID();
+	if (!ENTITY::DOES_ENTITY_EXIST(playerPed)) return false;
+
+	// Ensure we have at least one squad
+	if (g_squads.empty()) {
+		g_squads.push_back(Squad());
+		g_activeSquad = 0;
+	}
+	if (g_activeSquad < 0) g_activeSquad = 0;
+
+	// Cleanup dead guards first
+	CleanupDeadGuards();
+
+	// Check capacity (max 14 per squad, including pending spawns)
+	int currentTotal = (int)g_squads[g_activeSquad].guards.size() + (int)g_pendingSpawns.size();
+	if (currentTotal >= 14) {
+		DebugLog::log("Cannot queue guard spawn: squad limit (14) reached. Current: %d", currentTotal);
+		return false;
+	}
+
+	// Validate model (only IS_MODEL_IN_CDIMAGE)
+	DWORD model = GAMEPLAY::GET_HASH_KEY(const_cast<char *>(pedModel.c_str()));
+	if (!STREAMING::IS_MODEL_IN_CDIMAGE(model)) {
+		model = GAMEPLAY::GET_HASH_KEY("S_M_M_ValCowpoke_01");
+		if (!STREAMING::IS_MODEL_IN_CDIMAGE(model)) return false;
+	}
+
+	bool isAnimal = (model == GAMEPLAY::GET_HASH_KEY("A_C_WOLF")
+				|| model == GAMEPLAY::GET_HASH_KEY("A_C_WOLF_MEDIUM")
+				|| model == GAMEPLAY::GET_HASH_KEY("A_C_WOLF_SMALL")
+				|| model == GAMEPLAY::GET_HASH_KEY("A_C_COUGAR_01")
+				|| model == GAMEPLAY::GET_HASH_KEY("A_C_PANTHER_01"));
+
+	bool needsHorse = (!isAnimal && g_guardHorseEnabled);
+	Hash horseModel = 0;
+	if (needsHorse) {
+		horseModel = GAMEPLAY::GET_HASH_KEY("A_C_Horse_Turkoman_Gold");
+		if (!STREAMING::IS_MODEL_IN_CDIMAGE(horseModel)) {
+			horseModel = GAMEPLAY::GET_HASH_KEY("A_C_Horse_Morgan_Bay");
+		}
+		STREAMING::REQUEST_MODEL(horseModel, FALSE);
+	}
+
+	STREAMING::REQUEST_MODEL(model, FALSE);
+
+	PendingSpawn ps;
+	ps.pedModelName = pedModel;
+	ps.pedModelHash = model;
+	ps.needsHorse = needsHorse;
+	ps.horseModelHash = horseModel;
+	ps.queueTime = GetTickCount();
+
+	g_pendingSpawns.push_back(ps);
+	DebugLog::log("Queued guard spawn: ped=%s, hash=0x%08X, needsHorse=%d", pedModel.c_str(), model, needsHorse);
+
+	return true;
+}
+
+static void ProcessPendingSpawns() {
+	if (g_pendingSpawns.empty()) return;
+
+	Ped playerPed = PLAYER::PLAYER_PED_ID();
+	if (!ENTITY::DOES_ENTITY_EXIST(playerPed)) return;
+
+	for (auto it = g_pendingSpawns.begin(); it != g_pendingSpawns.end(); ) {
+		bool pedLoaded = STREAMING::HAS_MODEL_LOADED(it->pedModelHash) ? true : false;
+		if (!pedLoaded) {
+			STREAMING::REQUEST_MODEL(it->pedModelHash, FALSE);
+		}
+		bool horseLoaded = true;
+		if (it->needsHorse) {
+			horseLoaded = STREAMING::HAS_MODEL_LOADED(it->horseModelHash) ? true : false;
+			if (!horseLoaded) {
+				STREAMING::REQUEST_MODEL(it->horseModelHash, FALSE);
+			}
+		}
+
+		if (pedLoaded && horseLoaded) {
+			Vector3 spawnPos = ENTITY::GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS(playerPed, 0.0f, 3.0f, -0.3f);
+			Ped newPed = PED::CREATE_PED(it->pedModelHash, spawnPos.x, spawnPos.y, spawnPos.z, static_cast<float>(rand() % 360), 0, 0, 0, 0);
+			WAIT(0);
+
+			if (ENTITY::DOES_ENTITY_EXIST(newPed)) {
+				PED::SET_PED_VISIBLE(newPed, TRUE);
+				PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(newPed, TRUE);
+				PED::SET_PED_KEEP_TASK(newPed, TRUE);
+				PED::SET_PED_COMBAT_ABILITY(newPed, 2);
+				PED::SET_PED_COMBAT_MOVEMENT(newPed, 2);
+				PED::SET_PED_FLEE_ATTRIBUTES(newPed, 0, FALSE);
+				PED::SET_PED_ACCURACY(newPed, 70);
+
+				Hash myGroup = PED::GET_PED_RELATIONSHIP_GROUP_DEFAULT_HASH(playerPed);
+				PED::SET_PED_RELATIONSHIP_GROUP_HASH(newPed, myGroup);
+
+				int grp = PLAYER::GET_PLAYER_GROUP(PLAYER::PLAYER_ID());
+				if (grp) PED::SET_PED_AS_GROUP_MEMBER(newPed, grp);
+
+				bool isAnimal = (it->pedModelHash == GAMEPLAY::GET_HASH_KEY("A_C_WOLF")
+							|| it->pedModelHash == GAMEPLAY::GET_HASH_KEY("A_C_WOLF_MEDIUM")
+							|| it->pedModelHash == GAMEPLAY::GET_HASH_KEY("A_C_WOLF_SMALL")
+							|| it->pedModelHash == GAMEPLAY::GET_HASH_KEY("A_C_COUGAR_01")
+							|| it->pedModelHash == GAMEPLAY::GET_HASH_KEY("A_C_PANTHER_01"));
+
+				if (g_guardInvincibleEnabled) {
+					ENTITY::SET_ENTITY_INVINCIBLE(newPed, TRUE);
+					ENTITY::SET_ENTITY_CAN_BE_DAMAGED(newPed, FALSE);
+				}
+
+				if (!isAnimal) {
+					Hash w = GAMEPLAY::GET_HASH_KEY("WEAPON_REPEATER_CARBINE");
+					WEAPON::GIVE_DELAYED_WEAPON_TO_PED(newPed, w, 200, 1, 0x2cd419dc);
+					WEAPON::SET_CURRENT_PED_WEAPON(newPed, w, 1, 0, 0, 0);
+					WEAPON::SET_PED_AMMO(newPed, w, 999);
+				}
+
+				Ped guardHorse = 0;
+				if (it->needsHorse) {
+					Vector3 horsePos = ENTITY::GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS(playerPed, 2.0f, 4.0f + (float)(g_squads[g_activeSquad].guards.size()) * 2.0f, -0.3f);
+					guardHorse = PED::CREATE_PED(it->horseModelHash, horsePos.x, horsePos.y, horsePos.z, static_cast<float>(rand() % 360), 0, 0, 0, 0);
+					WAIT(0);
+
+					if (ENTITY::DOES_ENTITY_EXIST(guardHorse)) {
+						if (g_guardInvincibleEnabled) {
+							ENTITY::SET_ENTITY_INVINCIBLE(guardHorse, TRUE);
+							ENTITY::SET_ENTITY_CAN_BE_DAMAGED(guardHorse, FALSE);
+						}
+						PED::SET_PED_VISIBLE(guardHorse, TRUE);
+						PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(guardHorse, TRUE);
+						invoke<Void>(0xED1C764997A86D5A, newPed, guardHorse);
+					}
+					STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(it->horseModelHash);
+				}
+
+				int idx = (int)g_squads[g_activeSquad].guards.size();
+				float offX = 0.0f, offY = 0.0f;
+				GetFormationOffset(idx, g_activeFormation, false, offX, offY);
+				AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(newPed, playerPed, offX, offY, 0.0f, 2.6f, -1, 1.6f, TRUE, FALSE, FALSE, FALSE, FALSE);
+
+				GuardInfo gi;
+				gi.ped = newPed;
+				gi.horse = guardHorse;
+				gi.mounted = (guardHorse != 0 && ENTITY::DOES_ENTITY_EXIST(guardHorse));
+				g_squads[g_activeSquad].guards.push_back(gi);
+
+				STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(it->pedModelHash);
+
+				int totalCount = GetTotalGuardCount();
+				wchar_t speechBuf[100];
+				swprintf_s(speechBuf, L"Guard spawned. Squad size %d", totalCount);
+				A11y::speak(speechBuf, false);
+
+				DebugLog::log("Async spawned guard success: ped=%d, horse=%d, total squad=%d", newPed, guardHorse, totalCount);
 			} else {
-				// Dismount: SDK header lacks a specific dismount native; clear tasks to force leaving mount
-				AI::CLEAR_PED_TASKS(gi.ped, TRUE, TRUE);
+				STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(it->pedModelHash);
+				if (it->needsHorse) STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(it->horseModelHash);
+				A11y::speak(L"Guard spawn failed entity creation", false);
+				DebugLog::log("Async spawn failed: entity creation failed for model hash 0x%08X", it->pedModelHash);
 			}
-			++toggled;
+
+			it = g_pendingSpawns.erase(it);
 		}
-		wchar_t buf[64]; swprintf_s(buf, L"%d toggled", toggled); A11y::speak(buf, true);
-	}}; menu->AddItem(new MenuItemMountDismount());
+		else {
+			if (GetTickCount() - it->queueTime > 15000) {
+				STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(it->pedModelHash);
+				if (it->needsHorse) STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(it->horseModelHash);
+				A11y::speak(L"Guard spawn timed out loading model", false);
+				DebugLog::log("Async spawn timed out loading model hash 0x%08X", it->pedModelHash);
+
+				it = g_pendingSpawns.erase(it);
+			} else {
+				++it;
+			}
+		}
+	}
+}
+
+// --- Give weapon to all guards in active squad ---
+static void GiveWeaponToSquad(Hash weaponHash) {
+	if (g_activeSquad < 0 || g_activeSquad >= (int)g_squads.size()) return;
+	for (auto &gi : g_squads[g_activeSquad].guards) {
+		if (!gi.ped || !ENTITY::DOES_ENTITY_EXIST(gi.ped) || ENTITY::IS_ENTITY_DEAD(gi.ped)) continue;
+		WEAPON::GIVE_DELAYED_WEAPON_TO_PED(gi.ped, weaponHash, 500, 1, 0x2cd419dc);
+		WEAPON::SET_CURRENT_PED_WEAPON(gi.ped, weaponHash, 1, 0, 0, 0);
+		WEAPON::SET_PED_AMMO(gi.ped, weaponHash, 999);
+	}
+}
+
+// --- Dismiss all guards ---
+static void DismissAllGuards() {
+	for (const auto &ps : g_pendingSpawns) {
+		STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(ps.pedModelHash);
+		if (ps.needsHorse) STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(ps.horseModelHash);
+	}
+	g_pendingSpawns.clear();
+
+	for (auto &sq : g_squads) {
+		for (auto &gi : sq.guards) {
+			if (gi.horse && ENTITY::DOES_ENTITY_EXIST(gi.horse)) {
+				ENTITY::SET_ENTITY_AS_MISSION_ENTITY(gi.horse, 0, 0);
+				ENTITY::DELETE_ENTITY(&gi.horse);
+			}
+			if (gi.ped && ENTITY::DOES_ENTITY_EXIST(gi.ped)) {
+				PED::REMOVE_PED_FROM_GROUP(gi.ped);
+				AI::CLEAR_PED_TASKS(gi.ped, FALSE, FALSE);
+				ENTITY::SET_ENTITY_AS_MISSION_ENTITY(gi.ped, 0, 0);
+				ENTITY::DELETE_ENTITY(&gi.ped);
+			}
+		}
+		sq.guards.clear();
+	}
+	g_squads.clear();
+	g_activeSquad = -1;
+	g_activeSquadOrder = SquadOrder::Follow;
+}
+
+// --- Auto-defense: scan nearby hostiles and order guards to engage ---
+static void SquadAutoDefense() {
+	if (g_activeSquad < 0 || g_activeSquad >= (int)g_squads.size()) return;
+	if (g_activeSquadOrder == SquadOrder::Hold) return;
+
+	DWORD now = GetTickCount();
+	if ((now - g_lastGuardDefenseTickMs) < 700) return;
+	g_lastGuardDefenseTickMs = now;
+
+	Ped me = PLAYER::PLAYER_PED_ID();
+	if (!ENTITY::DOES_ENTITY_EXIST(me)) return;
+
+	Vector3 meC = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
+	Ped attackers[24]; int attackerN = 0;
+
+	int packed[33] = { 32 };
+	int count = PED::GET_PED_NEARBY_PEDS(me, packed, -1, 0);
+	bool meleeDanger = PED::IS_PED_IN_MELEE_COMBAT(me) ? true : false;
+
+	if (count > 0) {
+		int lim = packed[0]; if (lim > 32) lim = 32;
+		for (int i = 1; i <= lim; ++i) {
+			Ped q = (Ped)packed[i];
+			if (!q || q == me) continue;
+			if (!ENTITY::DOES_ENTITY_EXIST(q) || ENTITY::IS_ENTITY_DEAD(q) || PED::IS_PED_A_PLAYER(q)) continue;
+			if (IsOurGuard(q)) continue;
+
+			Vector3 qc = ENTITY::GET_ENTITY_COORDS(q, TRUE, FALSE);
+			float d = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(meC.x, meC.y, meC.z, qc.x, qc.y, qc.z, TRUE);
+			if (d > 65.0f) continue;
+
+			bool shot = PED::IS_PED_SHOOTING(q) ? true : false;
+			bool attackingMe = PED::IS_PED_IN_COMBAT(q, me) ? true : false;
+			bool damaged = ENTITY::HAS_ENTITY_BEEN_DAMAGED_BY_ENTITY(me, q, TRUE, FALSE) ? true : false;
+			bool closeMelee = (d < 6.5f) && (PED::IS_PED_IN_MELEE_COMBAT(q) || meleeDanger);
+
+			if (shot || attackingMe || damaged || closeMelee) {
+				if (attackerN < 24) attackers[attackerN++] = q;
+			}
+		}
+	}
+
+	if (attackerN > 0) {
+		auto &sq = g_squads[g_activeSquad];
+		int assignIdx = 0;
+		for (auto &gi : sq.guards) {
+			Ped gp = gi.ped;
+			if (!gp || !ENTITY::DOES_ENTITY_EXIST(gp) || ENTITY::IS_ENTITY_DEAD(gp)) continue;
+			if (PED::IS_PED_IN_COMBAT(gp, 0)) continue;
+
+			Ped tgt = attackers[assignIdx % attackerN]; assignIdx++;
+			PED::SET_PED_COMBAT_ABILITY(gp, 2);
+			PED::SET_PED_COMBAT_MOVEMENT(gp, 2);
+			PED::SET_PED_FLEE_ATTRIBUTES(gp, 0, FALSE);
+			PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(gp, TRUE);
+			AI::TASK_COMBAT_PED(gp, tgt, 0, 0);
+		}
+		ENTITY::CLEAR_ENTITY_LAST_DAMAGE_ENTITY(me);
+	}
+}
+
+// --- Silent auto-defense: instant kill hostiles within radius ---
+static void ScanAndEliminateHostiles() {
+	if (!g_autoDefenseEnabled) return;
+
+	DWORD now = GetTickCount();
+	if ((now - g_lastAutoDefenseScanMs) < 500) return;
+	g_lastAutoDefenseScanMs = now;
+
+	Ped playerPed = PLAYER::PLAYER_PED_ID();
+	if (!playerPed || !ENTITY::DOES_ENTITY_EXIST(playerPed) || ENTITY::IS_ENTITY_DEAD(playerPed)) return;
+
+	Vector3 playerPos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
+	Ped playerHorse = 0;
+	if (PED::IS_PED_ON_MOUNT(playerPed)) playerHorse = PED::GET_MOUNT(playerPed);
+
+	int packed[33] = { 32 };
+	int count = PED::GET_PED_NEARBY_PEDS(playerPed, packed, -1, 0);
+	if (count <= 0) return;
+
+	int lim = packed[0]; if (lim > 32) lim = 32;
+	for (int i = 1; i <= lim; ++i) {
+		Ped target = (Ped)packed[i];
+		if (!target || target == playerPed) continue;
+		if (!ENTITY::DOES_ENTITY_EXIST(target) || ENTITY::IS_ENTITY_DEAD(target)) continue;
+		if (PED::IS_PED_A_PLAYER(target)) continue;
+		if (playerHorse && target == playerHorse) continue;
+		if (IsOurGuard(target)) continue;
+
+		Vector3 targetPos = ENTITY::GET_ENTITY_COORDS(target, TRUE, FALSE);
+		float distance = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(playerPos.x, playerPos.y, playerPos.z, targetPos.x, targetPos.y, targetPos.z, TRUE);
+		if (distance > g_autoDefenseRadius) continue;
+
+		bool isHostile = PED::IS_PED_IN_COMBAT(target, playerPed) || PED::IS_PED_SHOOTING(target);
+		if (ENTITY::HAS_ENTITY_BEEN_DAMAGED_BY_ENTITY(playerPed, target, TRUE, FALSE)) isHostile = true;
+
+		if (isHostile) {
+			ENTITY::SET_ENTITY_HEALTH(target, 0, 0);
+		}
+	}
+}
+
+// --- Squad background maintenance (called each frame) ---
+static void SquadFrameMaintenance() {
+	if (g_activeSquad < 0 || g_activeSquad >= (int)g_squads.size()) return;
+	DWORD now = GetTickCount();
+	Ped me = PLAYER::PLAYER_PED_ID();
+	if (!ENTITY::DOES_ENTITY_EXIST(me)) return;
+
+	// Auto-defense: guards engage attackers
+	SquadAutoDefense();
+
+	// Silent protection
+	ScanAndEliminateHostiles();
+
+	// Formation maintenance (every 1.2s during Follow)
+	if (g_activeSquadOrder == SquadOrder::Follow && (now - g_lastFormationTickMs) > 1200) {
+		g_lastFormationTickMs = now;
+		int i = 0;
+		for (auto &gi : g_squads[g_activeSquad].guards) {
+			if (!gi.ped || !ENTITY::DOES_ENTITY_EXIST(gi.ped) || ENTITY::IS_ENTITY_DEAD(gi.ped)) continue;
+			bool mounted = PED::IS_PED_ON_MOUNT(gi.ped) ? true : false;
+			float ox = 0.0f, oy = 0.0f;
+			GetFormationOffset(i, g_activeFormation, mounted, ox, oy); ++i;
+			CommandGuardFollowOffset(gi, me, ox, oy);
+		}
+	}
+
+	// Patrol wander (every 8s during Patrol)
+	if (g_activeSquadOrder == SquadOrder::Patrol && (now - g_lastPatrolTickMs) > 8000) {
+		g_lastPatrolTickMs = now;
+		Vector3 c = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
+		for (auto &gi : g_squads[g_activeSquad].guards) {
+			if (!gi.ped || !ENTITY::DOES_ENTITY_EXIST(gi.ped) || ENTITY::IS_ENTITY_DEAD(gi.ped)) continue;
+			float rx = ((GAMEPLAY::GET_RANDOM_INT_IN_RANGE(-100, 101)) / 100.0f) * 2.5f;
+			float ry = ((GAMEPLAY::GET_RANDOM_INT_IN_RANGE(-100, 101)) / 100.0f) * 2.5f;
+			AI::TASK_WANDER_IN_AREA(gi.ped, c.x + rx, c.y + ry, c.z, 4.0f, 1.8f, 3.5f, TRUE);
+		}
+	}
+
+	// Crowd control bubble (every 900ms)
+	if ((now - g_lastCrowdControlTickMs) > 900) {
+		g_lastCrowdControlTickMs = now;
+		Vector3 meC = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
+		bool playerMounted = PED::IS_PED_ON_MOUNT(me) ? true : false;
+		float bubbleR = playerMounted ? 5.0f : 3.4f;
+
+		int packed[33] = { 32 };
+		int count = PED::GET_PED_NEARBY_PEDS(me, packed, -1, 0);
+		if (count > 0) {
+			int lim = packed[0]; if (lim > 32) lim = 32;
+			for (int i = 1; i <= lim; ++i) {
+				Ped p = (Ped)packed[i];
+				if (!p || p == me) continue;
+				if (!ENTITY::DOES_ENTITY_EXIST(p) || ENTITY::IS_ENTITY_DEAD(p) || PED::IS_PED_A_PLAYER(p)) continue;
+				if (IsOurGuard(p)) continue;
+
+				Vector3 pc = ENTITY::GET_ENTITY_COORDS(p, TRUE, FALSE);
+				float d = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(meC.x, meC.y, meC.z, pc.x, pc.y, pc.z, TRUE);
+				if (d < bubbleR) {
+					Vector3 dir = { pc.x - meC.x, pc.y - meC.y, 0.0f };
+					float len = sqrtf(dir.x * dir.x + dir.y * dir.y);
+					if (len < 0.001f) len = 0.001f;
+					dir.x /= len; dir.y /= len;
+					float pushDist = playerMounted ? 6.0f : 4.0f;
+					Vector3 tgt = { meC.x + dir.x * (pushDist + 1.0f), meC.y + dir.y * (pushDist + 1.0f), pc.z };
+					AI::TASK_GO_TO_COORD_ANY_MEANS(p, tgt.x, tgt.y, tgt.z, 1.4f, 0, FALSE, 0, 0.0f);
+				}
+			}
+		}
+	}
+
+	// Auto mount/dismount: sync guards with player mount state
+	bool playerNowMounted = PED::IS_PED_ON_MOUNT(me) ? true : false;
+	if (playerNowMounted && !g_playerWasMounted) {
+		// Player just mounted - command human guards to mount their horses
+		for (auto &gi : g_squads[g_activeSquad].guards) {
+			if (!gi.ped || !ENTITY::DOES_ENTITY_EXIST(gi.ped) || ENTITY::IS_ENTITY_DEAD(gi.ped)) continue;
+			if (gi.horse && ENTITY::DOES_ENTITY_EXIST(gi.horse) && !ENTITY::IS_ENTITY_DEAD(gi.horse)) {
+				if (!PED::IS_PED_ON_MOUNT(gi.ped)) {
+					invoke<Void>(0xED1C764997A86D5A, gi.ped, gi.horse); // _SET_PED_ONTO_MOUNT
+				}
+			}
+		}
+	} else if (!playerNowMounted && g_playerWasMounted) {
+		// Player just dismounted - command guards to dismount
+		for (auto &gi : g_squads[g_activeSquad].guards) {
+			if (!gi.ped || !ENTITY::DOES_ENTITY_EXIST(gi.ped) || ENTITY::IS_ENTITY_DEAD(gi.ped)) continue;
+			if (PED::IS_PED_ON_MOUNT(gi.ped)) {
+				AI::CLEAR_PED_TASKS_IMMEDIATELY(gi.ped, TRUE, TRUE);
+			}
+		}
+	}
+	g_playerWasMounted = playerNowMounted;
+}
+
+// --- Get total guard count across all squads ---
+static int GetTotalGuardCount() {
+	int total = 0;
+	for (const auto &sq : g_squads) total += (int)sq.guards.size();
+	return total;
+}
+
+// =======================================
+// SQUAD MENU ITEMS
+// =======================================
+
+class MenuItemSquadSpawn : public MenuItemDefault {
+	string m_model;
+	virtual void OnSelect() {
+		if (SpawnGuard(m_model)) {
+			int count = GetTotalGuardCount() + (int)g_pendingSpawns.size();
+			wchar_t buf[64]; swprintf_s(buf, L"Guard queued. Total: %d", count);
+			A11y::speak(buf, true);
+			SetStatusText("Guard queued! Total: " + to_string(count));
+		} else {
+			A11y::speak(L"Spawn failed or squad full", true);
+			SetStatusText("Squad full (14) or spawn failed!");
+		}
+	}
+public:
+	MenuItemSquadSpawn(string caption, string model) : MenuItemDefault(caption), m_model(model) {}
+};
+
+class MenuItemSquadGiveWeapon : public MenuItemDefault {
+	string m_weaponName;
+	virtual void OnSelect() {
+		Hash wh = GAMEPLAY::GET_HASH_KEY(const_cast<char *>(("WEAPON_" + m_weaponName).c_str()));
+		GiveWeaponToSquad(wh);
+		A11y::speak(L"Weapon given", true);
+		SetStatusText("Weapon: " + m_weaponName);
+	}
+public:
+	MenuItemSquadGiveWeapon(string caption, string weaponName) : MenuItemDefault(caption), m_weaponName(weaponName) {}
+};
+
+class MenuItemSquadDismiss : public MenuItemDefault {
+	virtual void OnSelect() {
+		DismissAllGuards();
+		A11y::speak(L"All guards dismissed", true);
+		SetStatusText("All guards dismissed!");
+	}
+public:
+	MenuItemSquadDismiss(string caption) : MenuItemDefault(caption) {}
+};
+
+class MenuItemSquadFollow : public MenuItemDefault {
+	virtual void OnSelect() {
+		if (g_activeSquad < 0 || g_activeSquad >= (int)g_squads.size()) {
+			A11y::speak(L"No squad", true); return;
+		}
+		Ped me = PLAYER::PLAYER_PED_ID();
+		int i = 0, applied = 0;
+		for (auto &gi : g_squads[g_activeSquad].guards) {
+			if (!gi.ped || !ENTITY::DOES_ENTITY_EXIST(gi.ped) || ENTITY::IS_ENTITY_DEAD(gi.ped)) continue;
+			float ox = 0.0f, oy = 0.0f;
+			GetFormationOffset(i, g_activeFormation, PED::IS_PED_ON_MOUNT(gi.ped) ? true : false, ox, oy); ++i;
+			CommandGuardFollowOffset(gi, me, ox, oy);
+			++applied;
+		}
+		g_activeSquadOrder = SquadOrder::Follow;
+		wchar_t buf[64]; swprintf_s(buf, L"Following: %d guards", applied);
+		A11y::speak(buf, true);
+	}
+public:
+	MenuItemSquadFollow(string caption) : MenuItemDefault(caption) {}
+};
+
+class MenuItemSquadHold : public MenuItemDefault {
+	virtual void OnSelect() {
+		if (g_activeSquad < 0 || g_activeSquad >= (int)g_squads.size()) {
+			A11y::speak(L"No squad", true); return;
+		}
+		int applied = 0;
+		for (auto &gi : g_squads[g_activeSquad].guards) {
+			if (!gi.ped || !ENTITY::DOES_ENTITY_EXIST(gi.ped) || ENTITY::IS_ENTITY_DEAD(gi.ped)) continue;
+			AI::CLEAR_PED_TASKS(gi.ped, TRUE, TRUE);
+			AI::TASK_STAND_STILL(gi.ped, 30000);
+			++applied;
+		}
+		g_activeSquadOrder = SquadOrder::Hold;
+		wchar_t buf[64]; swprintf_s(buf, L"Holding: %d guards", applied);
+		A11y::speak(buf, true);
+	}
+public:
+	MenuItemSquadHold(string caption) : MenuItemDefault(caption) {}
+};
+
+class MenuItemSquadGuardHere : public MenuItemDefault {
+	virtual void OnSelect() {
+		if (g_activeSquad < 0 || g_activeSquad >= (int)g_squads.size()) {
+			A11y::speak(L"No squad", true); return;
+		}
+		Ped me = PLAYER::PLAYER_PED_ID();
+		Vector3 c = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
+		float baseH = ENTITY::GET_ENTITY_HEADING(me);
+		static const float ring[7][2] = { {1.5f,0.0f}, {-1.5f,0.0f}, {0.0f,1.5f}, {0.0f,-1.5f}, {2.0f,0.8f}, {-2.0f,0.8f}, {0.0f,2.5f} };
+		int applied = 0, i = 0;
+		for (auto &gi : g_squads[g_activeSquad].guards) {
+			if (!gi.ped || !ENTITY::DOES_ENTITY_EXIST(gi.ped) || ENTITY::IS_ENTITY_DEAD(gi.ped)) continue;
+			float dx = ring[i % 7][0], dy = ring[i % 7][1]; ++i;
+			AI::CLEAR_PED_TASKS(gi.ped, TRUE, TRUE);
+			AI::TASK_STAND_GUARD(gi.ped, c.x + dx, c.y + dy, c.z, baseH, (char *)"WORLD_HUMAN_STAND_GUARD");
+			++applied;
+		}
+		g_activeSquadOrder = SquadOrder::GuardHere;
+		g_guardHerePos = c;
+		wchar_t buf[64]; swprintf_s(buf, L"Guarding here: %d guards", applied);
+		A11y::speak(buf, true);
+	}
+public:
+	MenuItemSquadGuardHere(string caption) : MenuItemDefault(caption) {}
+};
+
+class MenuItemSquadToggleDefense : public MenuItemDefault {
+	virtual void OnSelect() {
+		g_autoDefenseEnabled = !g_autoDefenseEnabled;
+		if (g_autoDefenseEnabled)
+			A11y::speak(L"Auto defense activated", true);
+		else
+			A11y::speak(L"Auto defense deactivated", true);
+	}
+public:
+	MenuItemSquadToggleDefense(string caption) : MenuItemDefault(caption) {}
+};
+
+class MenuItemSquadFormation : public MenuItemDefault {
+	virtual void OnSelect() {
+		int f = (int)g_activeFormation;
+		f = (f + 1) % 3;
+		g_activeFormation = (GuardFormation)f;
+		const wchar_t *names[] = { L"Column formation", L"Line formation", L"Wedge formation" };
+		A11y::speak(names[f], true);
+	}
+public:
+	MenuItemSquadFormation(string caption) : MenuItemDefault(caption) {}
+};
+
+// =======================================
+// SQUAD MENU BUILDERS
+// =======================================
+
+MenuBase *CreateSquadWeaponMenu(MenuController *controller) {
+	auto menu = new MenuBase(new MenuItemListTitle("WEAPON SELECT"));
 	controller->RegisterMenu(menu);
-	menu->AddItem(new MenuItemSpeakOnSelect("Give horses", L"give horses"));
-	menu->AddItem(new MenuItemSpeakOnSelect("Remove horses", L"remove horses"));
-	menu->AddItem(new MenuItemSpeakOnSelect("Mount / dismount", L"mount or dismount"));
+	menu->AddItem(new MenuItemSquadGiveWeapon("REVOLVER CATTLEMAN", "REVOLVER_CATTLEMAN"));
+	menu->AddItem(new MenuItemSquadGiveWeapon("REVOLVER DOUBLE ACTION", "REVOLVER_DOUBLE_ACTION"));
+	menu->AddItem(new MenuItemSquadGiveWeapon("PISTOL MAUSER", "PISTOL_MAUSER"));
+	menu->AddItem(new MenuItemSquadGiveWeapon("RIFLE SPRINGFIELD", "RIFLE_SPRINGFIELD"));
+	menu->AddItem(new MenuItemSquadGiveWeapon("RIFLE BOLT ACTION", "RIFLE_BOLTACTION"));
+	menu->AddItem(new MenuItemSquadGiveWeapon("CARBINE REPEATER", "CARBINE_REPEATER"));
+	menu->AddItem(new MenuItemSquadGiveWeapon("SHOTGUN SAWEDOFF", "SHOTGUN_SAWEDOFF"));
+	menu->AddItem(new MenuItemSquadGiveWeapon("REPEATER CARBINE", "REPEATER_CARBINE"));
+	menu->AddItem(new MenuItemSquadGiveWeapon("SNIPER CARCANO", "SNIPER_CARCANO"));
 	return menu;
 }
 
-static MenuBase* CreateGuardFormationsMenu(MenuController* controller)
-{
-	auto menu = new MenuBase(new MenuItemListTitle("FORMATIONS"));
+MenuBase *CreateSquadSpawnMenu(MenuController *controller) {
+	auto menu = new MenuBase(new MenuItemListTitle("SPAWN GUARD"));
 	controller->RegisterMenu(menu);
-	class MenuItemSetFormation : public MenuItemDefault {
-		GuardFormation m_f; std::wstring m_w;
-	public:
-		MenuItemSetFormation(const char* caption, GuardFormation f, const std::wstring &w)
-			: MenuItemDefault(caption), m_f(f), m_w(w) {}
-		void OnSelect() override {
-			g_activeFormation = m_f;
-			if (!m_w.empty()) A11y::speak(m_w, true);
+	menu->AddItem(new MenuItemSquadSpawn("COWBOY", "S_M_M_ValCowpoke_01"));
+	menu->AddItem(new MenuItemSquadSpawn("COWBOY 2", "S_M_M_BLWCOWPOKE_01"));
+	menu->AddItem(new MenuItemSquadSpawn("OUTLAW", "U_M_M_LNSOUTLAW_01"));
+	menu->AddItem(new MenuItemSquadSpawn("OUTLAW 2", "U_M_M_LNSOUTLAW_02"));
+	menu->AddItem(new MenuItemSquadSpawn("GUNSLINGER", "A_M_M_UniGunslinger_01"));
+	menu->AddItem(new MenuItemSquadSpawn("CORNWALL GUARD", "S_M_M_CORNWALLGUARD_01"));
+	menu->AddItem(new MenuItemSquadSpawn("WOLF", "A_C_WOLF"));
+	menu->AddItem(new MenuItemSquadSpawn("WOLF MEDIUM", "A_C_WOLF_MEDIUM"));
+	menu->AddItem(new MenuItemSquadSpawn("WOLF SMALL", "A_C_WOLF_SMALL"));
+	menu->AddItem(new MenuItemSquadSpawn("COUGAR", "A_C_COUGAR_01"));
+	menu->AddItem(new MenuItemSquadSpawn("PANTHER", "A_C_PANTHER_01"));
+	return menu;
+}
+
+MenuBase *CreateSquadOrderMenu(MenuController *controller) {
+	auto menu = new MenuBase(new MenuItemTitle("SQUAD ORDERS"));
+	controller->RegisterMenu(menu);
+	menu->AddItem(new MenuItemSquadFollow("FOLLOW ME"));
+	menu->AddItem(new MenuItemSquadHold("HOLD POSITION"));
+	menu->AddItem(new MenuItemSquadGuardHere("GUARD HERE"));
+	menu->AddItem(new MenuItemSquadToggleDefense("TOGGLE AUTO DEFENSE"));
+	menu->AddItem(new MenuItemSquadFormation("CHANGE FORMATION"));
+	return menu;
+}
+
+// =======================================
+// GUARD SETTINGS MENU ITEM CLASSES
+// =======================================
+class MenuItemGuardHorseToggle : public MenuItemSwitchable
+{
+	virtual void OnSelect() {
+		g_guardHorseEnabled = !g_guardHorseEnabled;
+		SetState(g_guardHorseEnabled);
+		A11y::speak(g_guardHorseEnabled ? L"Guard horses enabled" : L"Guard horses disabled", true);
+	}
+public:
+	MenuItemGuardHorseToggle(string caption) : MenuItemSwitchable(caption) { SetState(g_guardHorseEnabled); }
+};
+
+class MenuItemGuardInvincibleToggle : public MenuItemSwitchable
+{
+	virtual void OnSelect() {
+		g_guardInvincibleEnabled = !g_guardInvincibleEnabled;
+		SetState(g_guardInvincibleEnabled);
+		// Apply to existing guards immediately
+		if (g_activeSquad >= 0 && g_activeSquad < (int)g_squads.size()) {
+			for (auto &gi : g_squads[g_activeSquad].guards) {
+				if (gi.ped && ENTITY::DOES_ENTITY_EXIST(gi.ped) && !ENTITY::IS_ENTITY_DEAD(gi.ped)) {
+					ENTITY::SET_ENTITY_INVINCIBLE(gi.ped, g_guardInvincibleEnabled);
+					ENTITY::SET_ENTITY_CAN_BE_DAMAGED(gi.ped, !g_guardInvincibleEnabled);
+				}
+				if (gi.horse && ENTITY::DOES_ENTITY_EXIST(gi.horse) && !ENTITY::IS_ENTITY_DEAD(gi.horse)) {
+					ENTITY::SET_ENTITY_INVINCIBLE(gi.horse, g_guardInvincibleEnabled);
+					ENTITY::SET_ENTITY_CAN_BE_DAMAGED(gi.horse, !g_guardInvincibleEnabled);
+				}
+			}
 		}
+		A11y::speak(g_guardInvincibleEnabled ? L"Guards invincible" : L"Guards can be killed", true);
+	}
+public:
+	MenuItemGuardInvincibleToggle(string caption) : MenuItemSwitchable(caption) { SetState(g_guardInvincibleEnabled); }
+};
+
+MenuBase *CreateGuardSettingsMenu(MenuController *controller) {
+	auto menu = new MenuBase(new MenuItemTitle("GUARD SETTINGS"));
+	controller->RegisterMenu(menu);
+	menu->AddItem(new MenuItemGuardHorseToggle("SPAWN WITH HORSE"));
+	menu->AddItem(new MenuItemGuardInvincibleToggle("INVINCIBLE"));
+	return menu;
+}
+
+MenuBase *CreateBodyguardMenu(MenuController *controller) {
+	auto menu = new MenuBase(new MenuItemTitle("SQUAD MANAGER"));
+	controller->RegisterMenu(menu);
+	menu->AddItem(new MenuItemMenu("SPAWN GUARD", CreateSquadSpawnMenu(controller)));
+	menu->AddItem(new MenuItemMenu("ORDERS", CreateSquadOrderMenu(controller)));
+	menu->AddItem(new MenuItemMenu("GIVE WEAPON", CreateSquadWeaponMenu(controller)));
+	menu->AddItem(new MenuItemMenu("SETTINGS", CreateGuardSettingsMenu(controller)));
+	menu->AddItem(new MenuItemSquadDismiss("DISMISS ALL"));
+	return menu;
+}
+
+// =======================================
+// NUMPAD HOTKEYS FOR SQUAD CONTROL
+// =======================================
+
+static void HandleSquadHotkeys() {
+	// Numpad 1: Squad status with type breakdown
+	if (IsKeyJustUp(VK_NUMPAD1)) {
+		CleanupDeadGuards();
+		int count = GetTotalGuardCount();
+		if (count == 0) {
+			A11y::speak(L"No guards", true);
+		} else {
+			int alive = 0, fighting = 0;
+			int humans = 0, wolves = 0, cougars = 0, panthers = 0;
+			if (g_activeSquad >= 0 && g_activeSquad < (int)g_squads.size()) {
+				for (auto &gi : g_squads[g_activeSquad].guards) {
+					if (!gi.ped || !ENTITY::DOES_ENTITY_EXIST(gi.ped) || ENTITY::IS_ENTITY_DEAD(gi.ped)) continue;
+					alive++;
+					if (PED::IS_PED_IN_COMBAT(gi.ped, 0)) fighting++;
+					Hash m = ENTITY::GET_ENTITY_MODEL(gi.ped);
+					if (m == GAMEPLAY::GET_HASH_KEY("A_C_WOLF") || m == GAMEPLAY::GET_HASH_KEY("A_C_WOLF_MEDIUM") || m == GAMEPLAY::GET_HASH_KEY("A_C_WOLF_SMALL")) wolves++;
+					else if (m == GAMEPLAY::GET_HASH_KEY("A_C_COUGAR_01")) cougars++;
+					else if (m == GAMEPLAY::GET_HASH_KEY("A_C_PANTHER_01")) panthers++;
+					else humans++;
+				}
+			}
+			wchar_t buf[300];
+			int pos = swprintf_s(buf, L"%d alive, %d fighting. ", alive, fighting);
+			bool first = true;
+			if (humans > 0) { pos += swprintf_s(buf + pos, 300 - pos, L"%d human%s", humans, humans > 1 ? L"s" : L""); first = false; }
+			if (wolves > 0) { pos += swprintf_s(buf + pos, 300 - pos, L"%s%d %s", first ? L"" : L", ", wolves, wolves > 1 ? L"wolves" : L"wolf"); first = false; }
+			if (cougars > 0) { pos += swprintf_s(buf + pos, 300 - pos, L"%s%d cougar%s", first ? L"" : L", ", cougars, cougars > 1 ? L"s" : L""); first = false; }
+			if (panthers > 0) { pos += swprintf_s(buf + pos, 300 - pos, L"%s%d panther%s", first ? L"" : L", ", panthers, panthers > 1 ? L"s" : L""); first = false; }
+			A11y::speak(buf, true);
+		}
+	}
+
+	// Numpad 2: Teleport guards to player (regroup)
+	if (IsKeyJustUp(VK_NUMPAD2)) {
+		if (g_activeSquad < 0 || g_activeSquad >= (int)g_squads.size()) { A11y::speak(L"No squad", true); return; }
+		Ped me = PLAYER::PLAYER_PED_ID();
+		if (!ENTITY::DOES_ENTITY_EXIST(me)) { A11y::speak(L"No player", true); return; }
+		int i = 0, applied = 0;
+		for (auto &gi : g_squads[g_activeSquad].guards) {
+			if (!gi.ped || !ENTITY::DOES_ENTITY_EXIST(gi.ped) || ENTITY::IS_ENTITY_DEAD(gi.ped)) continue;
+			bool mounted = PED::IS_PED_ON_MOUNT(gi.ped) ? true : false;
+			float ox = 0.0f, oy = 0.0f;
+			GetFormationOffset(i, g_activeFormation, mounted, ox, oy); ++i;
+			Vector3 to = ENTITY::GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS(me, ox, oy, 0.0f);
+			if (mounted && gi.horse && ENTITY::DOES_ENTITY_EXIST(gi.horse))
+				ENTITY::SET_ENTITY_COORDS(gi.horse, to.x, to.y, to.z, FALSE, FALSE, FALSE, TRUE);
+			ENTITY::SET_ENTITY_COORDS(gi.ped, to.x, to.y, to.z, FALSE, FALSE, FALSE, TRUE);
+			++applied;
+		}
+		g_activeSquadOrder = SquadOrder::Follow;
+		wchar_t buf[64]; swprintf_s(buf, L"Regrouped %d", applied);
+		A11y::speak(buf, true);
+	}
+
+	// Numpad 7: Follow me
+	if (IsKeyJustUp(VK_NUMPAD7)) {
+		if (g_activeSquad < 0 || g_activeSquad >= (int)g_squads.size()) { A11y::speak(L"No squad", true); return; }
+		Ped me = PLAYER::PLAYER_PED_ID();
+		int i = 0, applied = 0;
+		for (auto &gi : g_squads[g_activeSquad].guards) {
+			if (!gi.ped || !ENTITY::DOES_ENTITY_EXIST(gi.ped) || ENTITY::IS_ENTITY_DEAD(gi.ped)) continue;
+			bool mounted = PED::IS_PED_ON_MOUNT(gi.ped) ? true : false;
+			float ox = 0.0f, oy = 0.0f;
+			GetFormationOffset(i, g_activeFormation, mounted, ox, oy); ++i;
+			CommandGuardFollowOffset(gi, me, ox, oy);
+			++applied;
+		}
+		g_activeSquadOrder = SquadOrder::Follow;
+		wchar_t buf[64]; swprintf_s(buf, L"Follow %d", applied);
+		A11y::speak(buf, true);
+	}
+
+	// Numpad 8: Hold position
+	if (IsKeyJustUp(VK_NUMPAD8)) {
+		if (g_activeSquad < 0 || g_activeSquad >= (int)g_squads.size()) { A11y::speak(L"No squad", true); return; }
+		int applied = 0;
+		for (auto &gi : g_squads[g_activeSquad].guards) {
+			if (!gi.ped || !ENTITY::DOES_ENTITY_EXIST(gi.ped) || ENTITY::IS_ENTITY_DEAD(gi.ped)) continue;
+			AI::CLEAR_PED_TASKS(gi.ped, TRUE, TRUE);
+			AI::TASK_STAND_STILL(gi.ped, 30000);
+			++applied;
+		}
+		g_activeSquadOrder = SquadOrder::Hold;
+		wchar_t buf[64]; swprintf_s(buf, L"Hold %d", applied);
+		A11y::speak(buf, true);
+	}
+
+	// Numpad 9: Guard here
+	if (IsKeyJustUp(VK_NUMPAD9)) {
+		if (g_activeSquad < 0 || g_activeSquad >= (int)g_squads.size()) { A11y::speak(L"No squad", true); return; }
+		Ped me = PLAYER::PLAYER_PED_ID();
+		Vector3 c = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
+		float baseH = ENTITY::GET_ENTITY_HEADING(me);
+		static const float ring[7][2] = { {1.5f,0.0f}, {-1.5f,0.0f}, {0.0f,1.5f}, {0.0f,-1.5f}, {2.0f,0.8f}, {-2.0f,0.8f}, {0.0f,2.5f} };
+		int applied = 0, idx = 0;
+		for (auto &gi : g_squads[g_activeSquad].guards) {
+			if (!gi.ped || !ENTITY::DOES_ENTITY_EXIST(gi.ped) || ENTITY::IS_ENTITY_DEAD(gi.ped)) continue;
+			float dx = ring[idx % 7][0], dy = ring[idx % 7][1]; ++idx;
+			AI::CLEAR_PED_TASKS(gi.ped, TRUE, TRUE);
+			AI::TASK_STAND_GUARD(gi.ped, c.x + dx, c.y + dy, c.z, baseH, (char *)"WORLD_HUMAN_STAND_GUARD");
+			++applied;
+		}
+		g_activeSquadOrder = SquadOrder::GuardHere;
+		g_guardHerePos = c;
+		wchar_t buf[64]; swprintf_s(buf, L"Guard %d", applied);
+		A11y::speak(buf, true);
+	}
+
+	// Numpad 6: Toggle auto defense
+	if (IsKeyJustUp(VK_NUMPAD6)) {
+		g_autoDefenseEnabled = !g_autoDefenseEnabled;
+		A11y::speak(g_autoDefenseEnabled ? L"Protection on" : L"Protection off", true);
+	}
+
+	// Numpad 0: Change formation
+	if (IsKeyJustUp(VK_NUMPAD0)) {
+		int f = (int)g_activeFormation;
+		f = (f + 1) % 3;
+		g_activeFormation = (GuardFormation)f;
+		const wchar_t *names[] = { L"Column", L"Line", L"Wedge" };
+		A11y::speak(names[f], true);
+	}
+}
+
+// =======================================
+// PAUSE MENU ACCESSIBILITY (with tab/item reading)
+// =======================================
+
+// RDR2 pause menu tabs in order (standard Story Mode layout)
+static const wchar_t* g_pauseTabNames[] = {
+	L"Map",         // Tab 0
+	L"Journal",     // Tab 1
+	L"Satchel",     // Tab 2
+	L"Kit",         // Tab 3 (camp/items)
+	L"Player",      // Tab 4
+	L"Settings"     // Tab 5
+};
+static const int g_pauseTabCount = 6;
+static int g_pauseTabIndex = 0;
+static int g_pauseItemIndex = 0;
+static DWORD g_lastPauseNavMs = 0;
+
+// Settings sub-items (known structure)
+static const wchar_t* g_settingsItems[] = {
+	L"Display", L"Audio", L"Camera", L"Controls", L"General"
+};
+static const int g_settingsItemCount = 5;
+
+// Satchel sub-items
+static const wchar_t* g_satchelItems[] = {
+	L"Provisions", L"Kit", L"Valuables", L"Documents", L"Ingredients"
+};
+static const int g_satchelItemCount = 5;
+
+// Journal sub-items
+static const wchar_t* g_journalItems[] = {
+	L"Log", L"Objectives", L"Notes", L"Map Legend"
+};
+static const int g_journalItemCount = 4;
+
+// Player sub-items
+static const wchar_t* g_playerItems[] = {
+	L"Arthur", L"Horse", L"Gang", L"General", L"Compendium"
+};
+static const int g_playerItemCount = 5;
+
+// Kit sub-items
+static const wchar_t* g_kitItems[] = {
+	L"Camp", L"Items", L"Crafting"
+};
+static const int g_kitItemCount = 3;
+
+static void SpeakPauseTab() {
+	if (g_pauseTabIndex >= 0 && g_pauseTabIndex < g_pauseTabCount) {
+		wchar_t buf[128];
+		swprintf_s(buf, L"Tab: %s", g_pauseTabNames[g_pauseTabIndex]);
+		A11y::speak(buf, true);
+	}
+}
+
+static void GetPauseTabItems(const wchar_t*** outItems, int* outCount) {
+	*outItems = nullptr;
+	*outCount = 0;
+	switch (g_pauseTabIndex) {
+		case 1: *outItems = g_journalItems; *outCount = g_journalItemCount; break;
+		case 2: *outItems = g_satchelItems; *outCount = g_satchelItemCount; break;
+		case 3: *outItems = g_kitItems;     *outCount = g_kitItemCount;     break;
+		case 4: *outItems = g_playerItems;  *outCount = g_playerItemCount;  break;
+		case 5: *outItems = g_settingsItems; *outCount = g_settingsItemCount; break;
+	}
+}
+
+static void SpeakPauseItem() {
+	const wchar_t** items = nullptr;
+	int count = 0;
+	GetPauseTabItems(&items, &count);
+
+	if (items && count > 0 && g_pauseItemIndex >= 0 && g_pauseItemIndex < count) {
+		wchar_t buf[200];
+		swprintf_s(buf, L"%s, item %d of %d", items[g_pauseItemIndex], g_pauseItemIndex + 1, count);
+		A11y::speak(buf, true);
+	} else if (g_pauseTabIndex == 0) {
+		A11y::speak(L"Map. Use stick or arrows to navigate", true);
+	}
+}
+
+static void HandlePauseMenuAccessibility() {
+	// Tell ScriptHook to keep running behind pause menu
+	GRAPHICS::SET_SCRIPT_GFX_DRAW_BEHIND_PAUSEMENU(TRUE);
+
+	bool isPaused = UI::IS_PAUSE_MENU_ACTIVE() ? true : false;
+	bool isSatchel = invoke<BOOL>(0x25B7A0206BDFAC76, 0xD4D3636C) ? true : false; // IS_UIAPP_ACTIVE_BY_HASH("satchel")
+	bool isJournal = invoke<BOOL>(0x25B7A0206BDFAC76, 0xBC931A47) ? true : false; // IS_UIAPP_ACTIVE_BY_HASH("journal")
+
+	ActiveMenuType currentMenu = MENU_NONE;
+	if (isPaused) currentMenu = MENU_PAUSE;
+	else if (isSatchel) currentMenu = MENU_SATCHEL;
+	else if (isJournal) currentMenu = MENU_JOURNAL;
+
+	// Transition: opened a menu
+	if (currentMenu != MENU_NONE && g_activeMenuType == MENU_NONE) {
+		g_activeMenuType = currentMenu;
+		g_pauseTabIndex = 0;
+		g_pauseItemIndex = 0;
+		g_satchelCategoryIndex = 0;
+		g_satchelItemIndex = 0;
+		g_journalCategoryIndex = 0;
+		g_journalItemIndex = 0;
+
+		if (currentMenu == MENU_PAUSE) {
+			A11y::speak(L"Pause menu. Tab: Map. Use Left Right arrows or Q E for tabs, Up Down for items, Escape to close", true);
+		} else if (currentMenu == MENU_SATCHEL) {
+			A11y::speak(L"Satchel. Category: Provisions. Use Left Right arrows or Q E for categories, Up Down for items, Escape to close", true);
+		} else if (currentMenu == MENU_JOURNAL) {
+			A11y::speak(L"Journal. Tab: Log. Use Left Right arrows or Q E for tabs, Up Down for items, Escape to close", true);
+		}
+		g_lastPauseNavMs = GetTickCount();
+		return;
+	}
+
+	// Transition: closed the menu
+	if (currentMenu == MENU_NONE && g_activeMenuType != MENU_NONE) {
+		A11y::speak(L"Resumed", true);
+		g_activeMenuType = MENU_NONE;
+		return;
+	}
+
+	// While no menu is active, do nothing
+	if (currentMenu == MENU_NONE) return;
+
+	// If menu switched directly
+	if (currentMenu != g_activeMenuType) {
+		g_activeMenuType = currentMenu;
+		g_pauseTabIndex = 0;
+		g_pauseItemIndex = 0;
+		g_satchelCategoryIndex = 0;
+		g_satchelItemIndex = 0;
+		g_journalCategoryIndex = 0;
+		g_journalItemIndex = 0;
+		if (currentMenu == MENU_PAUSE) A11y::speak(L"Pause menu. Tab: Map.", true);
+		else if (currentMenu == MENU_SATCHEL) A11y::speak(L"Satchel. Category: Provisions.", true);
+		else if (currentMenu == MENU_JOURNAL) A11y::speak(L"Journal. Tab: Log.", true);
+		g_lastPauseNavMs = GetTickCount();
+		return;
+	}
+
+	DWORD now = GetTickCount();
+	// Debounce: 250ms between nav announcements
+	if ((now - g_lastPauseNavMs) < 250) return;
+
+	// Tab navigation: game frontend controls (LB=206, RB=207) + keyboard (Left/Right, Q/E)
+	bool tabRight = IsKeyJustUp(VK_RIGHT) || IsKeyJustUp(0x45 /* E */)
+		|| CONTROLS::IS_DISABLED_CONTROL_JUST_PRESSED(0, 207)  // RB
+		|| CONTROLS::IS_DISABLED_CONTROL_JUST_PRESSED(0, 175);  // FRONTEND_RIGHT
+	bool tabLeft = IsKeyJustUp(VK_LEFT) || IsKeyJustUp(0x51 /* Q */)
+		|| CONTROLS::IS_DISABLED_CONTROL_JUST_PRESSED(0, 206)   // LB
+		|| CONTROLS::IS_DISABLED_CONTROL_JUST_PRESSED(0, 174);  // FRONTEND_LEFT
+	bool navUp = IsKeyJustUp(VK_UP)
+		|| CONTROLS::IS_DISABLED_CONTROL_JUST_PRESSED(0, 172);  // FRONTEND_UP
+	bool navDown = IsKeyJustUp(VK_DOWN)
+		|| CONTROLS::IS_DISABLED_CONTROL_JUST_PRESSED(0, 173);  // FRONTEND_DOWN
+	bool navAccept = IsKeyJustUp(VK_RETURN)
+		|| CONTROLS::IS_DISABLED_CONTROL_JUST_PRESSED(0, 201);  // FRONTEND_ACCEPT
+	bool reAnnounce = IsKeyJustUp(VK_TAB);
+
+	if (g_activeMenuType == MENU_PAUSE) {
+		if (tabRight) {
+			g_pauseTabIndex = (g_pauseTabIndex + 1) % g_pauseTabCount;
+			g_pauseItemIndex = 0;
+			SpeakPauseTab();
+			g_lastPauseNavMs = now;
+		}
+		else if (tabLeft) {
+			g_pauseTabIndex = (g_pauseTabIndex - 1 + g_pauseTabCount) % g_pauseTabCount;
+			g_pauseItemIndex = 0;
+			SpeakPauseTab();
+			g_lastPauseNavMs = now;
+		}
+		else if (navUp) {
+			const wchar_t** items = nullptr;
+			int count = 0;
+			GetPauseTabItems(&items, &count);
+			if (count > 0) {
+				g_pauseItemIndex = (g_pauseItemIndex - 1 + count) % count;
+				SpeakPauseItem();
+			}
+			g_lastPauseNavMs = now;
+		}
+		else if (navDown) {
+			const wchar_t** items = nullptr;
+			int count = 0;
+			GetPauseTabItems(&items, &count);
+			if (count > 0) {
+				g_pauseItemIndex = (g_pauseItemIndex + 1) % count;
+				SpeakPauseItem();
+			}
+			g_lastPauseNavMs = now;
+		}
+		else if (navAccept) {
+			SpeakPauseItem();
+			g_lastPauseNavMs = now;
+		}
+		else if (reAnnounce) {
+			wchar_t buf[200];
+			swprintf_s(buf, L"Tab: %s. Item %d", g_pauseTabNames[g_pauseTabIndex], g_pauseItemIndex + 1);
+			A11y::speak(buf, true);
+			g_lastPauseNavMs = now;
+		}
+	}
+	else if (g_activeMenuType == MENU_SATCHEL) {
+		if (tabRight) {
+			g_satchelCategoryIndex = (g_satchelCategoryIndex + 1) % g_satchelCategoryCount;
+			g_satchelItemIndex = 0;
+			wchar_t buf[200];
+			swprintf_s(buf, L"Category: %s", g_satchelCategories[g_satchelCategoryIndex]);
+			A11y::speak(buf, true);
+			g_lastPauseNavMs = now;
+		}
+		else if (tabLeft) {
+			g_satchelCategoryIndex = (g_satchelCategoryIndex - 1 + g_satchelCategoryCount) % g_satchelCategoryCount;
+			g_satchelItemIndex = 0;
+			wchar_t buf[200];
+			swprintf_s(buf, L"Category: %s", g_satchelCategories[g_satchelCategoryIndex]);
+			A11y::speak(buf, true);
+			g_lastPauseNavMs = now;
+		}
+		else if (navUp) {
+			if (g_satchelItemIndex > 0) {
+				g_satchelItemIndex--;
+			}
+			wchar_t buf[200];
+			swprintf_s(buf, L"Item %d", g_satchelItemIndex + 1);
+			A11y::speak(buf, true);
+			g_lastPauseNavMs = now;
+		}
+		else if (navDown) {
+			g_satchelItemIndex++;
+			wchar_t buf[200];
+			swprintf_s(buf, L"Item %d", g_satchelItemIndex + 1);
+			A11y::speak(buf, true);
+			g_lastPauseNavMs = now;
+		}
+		else if (navAccept) {
+			wchar_t buf[200];
+			swprintf_s(buf, L"Selected item %d in %s", g_satchelItemIndex + 1, g_satchelCategories[g_satchelCategoryIndex]);
+			A11y::speak(buf, true);
+			g_lastPauseNavMs = now;
+		}
+		else if (reAnnounce) {
+			wchar_t buf[200];
+			swprintf_s(buf, L"Satchel Category: %s. Item %d", g_satchelCategories[g_satchelCategoryIndex], g_satchelItemIndex + 1);
+			A11y::speak(buf, true);
+			g_lastPauseNavMs = now;
+		}
+	}
+	else if (g_activeMenuType == MENU_JOURNAL) {
+		if (tabRight) {
+			g_journalCategoryIndex = (g_journalCategoryIndex + 1) % g_journalCategoryCount;
+			g_journalItemIndex = 0;
+			wchar_t buf[200];
+			swprintf_s(buf, L"Journal tab: %s", g_journalCategories[g_journalCategoryIndex]);
+			A11y::speak(buf, true);
+			g_lastPauseNavMs = now;
+		}
+		else if (tabLeft) {
+			g_journalCategoryIndex = (g_journalCategoryIndex - 1 + g_journalCategoryCount) % g_journalCategoryCount;
+			g_journalItemIndex = 0;
+			wchar_t buf[200];
+			swprintf_s(buf, L"Journal tab: %s", g_journalCategories[g_journalCategoryIndex]);
+			A11y::speak(buf, true);
+			g_lastPauseNavMs = now;
+		}
+		else if (navUp) {
+			if (g_journalItemIndex > 0) {
+				g_journalItemIndex--;
+			}
+			wchar_t buf[200];
+			swprintf_s(buf, L"Item %d", g_journalItemIndex + 1);
+			A11y::speak(buf, true);
+			g_lastPauseNavMs = now;
+		}
+		else if (navDown) {
+			g_journalItemIndex++;
+			wchar_t buf[200];
+			swprintf_s(buf, L"Item %d", g_journalItemIndex + 1);
+			A11y::speak(buf, true);
+			g_lastPauseNavMs = now;
+		}
+		else if (navAccept) {
+			wchar_t buf[200];
+			swprintf_s(buf, L"Selected item %d in %s", g_journalItemIndex + 1, g_journalCategories[g_journalCategoryIndex]);
+			A11y::speak(buf, true);
+			g_lastPauseNavMs = now;
+		}
+		else if (reAnnounce) {
+			wchar_t buf[200];
+			swprintf_s(buf, L"Journal Tab: %s. Item %d", g_journalCategories[g_journalCategoryIndex], g_journalItemIndex + 1);
+			A11y::speak(buf, true);
+			g_lastPauseNavMs = now;
+		}
+	}
+}
+
+// =======================================
+// WANTED / BOUNTY ANNOUNCEMENTS
+// =======================================
+
+static bool g_wasWanted = false;
+static DWORD g_lastWantedCheckMs = 0;
+static int g_lastBountyAnnounced = -1;
+
+static void HandleWantedAnnouncements() {
+	DWORD now = GetTickCount();
+	// Check every 2 seconds to avoid spam
+	if ((now - g_lastWantedCheckMs) < 2000) return;
+	g_lastWantedCheckMs = now;
+
+	Player player = PLAYER::PLAYER_ID();
+	int wantedLevel = PLAYER::GET_PLAYER_WANTED_LEVEL(player);
+	int bounty = PURSUIT::GET_PLAYER_PRICE_ON_A_HEAD(player);
+	int intensity = PURSUIT::GET_PLAYER_WANTED_INTENSITY(player);
+
+	bool isWantedNow = (wantedLevel > 0 || bounty > 0 || intensity > 0);
+
+	// Transition: became wanted
+	if (isWantedNow && !g_wasWanted) {
+		wchar_t buf[128];
+		int bountyDollars = bounty / 100;  // RDR2 stores in cents
+		if (bountyDollars > 0)
+			swprintf_s(buf, L"Wanted! Bounty: %d dollars", bountyDollars);
+		else
+			swprintf_s(buf, L"Wanted!");
+		A11y::speak(buf, true);
+		g_wasWanted = true;
+		g_lastBountyAnnounced = bountyDollars;
+	}
+	// Still wanted: announce bounty changes
+	else if (isWantedNow && g_wasWanted) {
+		int bountyDollars = bounty / 100;
+		if (bountyDollars != g_lastBountyAnnounced && bountyDollars > 0) {
+			wchar_t buf[128];
+			swprintf_s(buf, L"Bounty: %d dollars", bountyDollars);
+			A11y::speak(buf, false);  // don't interrupt other speech
+			g_lastBountyAnnounced = bountyDollars;
+		}
+	}
+	// Transition: no longer wanted
+	else if (!isWantedNow && g_wasWanted) {
+		A11y::speak(L"No longer wanted", true);
+		g_wasWanted = false;
+		g_lastBountyAnnounced = -1;
+	}
+}
+
+// =======================================
+// COMPASS DIRECTION HELPER
+// =======================================
+static const wchar_t* GetCompassDirection(float heading) {
+	// heading: 0=North, 90=West, 180=South, 270=East (RDR2 uses counter-clockwise)
+	if (heading < 0) heading += 360.0f;
+	if (heading >= 360.0f) heading -= 360.0f;
+	if (heading >= 337.5f || heading < 22.5f)  return L"North";
+	if (heading >= 22.5f && heading < 67.5f)   return L"North West";
+	if (heading >= 67.5f && heading < 112.5f)  return L"West";
+	if (heading >= 112.5f && heading < 157.5f) return L"South West";
+	if (heading >= 157.5f && heading < 202.5f) return L"South";
+	if (heading >= 202.5f && heading < 247.5f) return L"South East";
+	if (heading >= 247.5f && heading < 292.5f) return L"East";
+	if (heading >= 292.5f && heading < 337.5f) return L"North East";
+	return L"Unknown";
+}
+
+static int GetCompassDirIndex(float heading) {
+	if (heading < 0) heading += 360.0f;
+	if (heading >= 360.0f) heading -= 360.0f;
+	if (heading >= 337.5f || heading < 22.5f)  return 0; // N
+	if (heading >= 22.5f && heading < 67.5f)   return 1; // NW
+	if (heading >= 67.5f && heading < 112.5f)  return 2; // W
+	if (heading >= 112.5f && heading < 157.5f) return 3; // SW
+	if (heading >= 157.5f && heading < 202.5f) return 4; // S
+	if (heading >= 202.5f && heading < 247.5f) return 5; // SE
+	if (heading >= 247.5f && heading < 292.5f) return 6; // E
+	if (heading >= 292.5f && heading < 337.5f) return 7; // NE
+	return -1;
+}
+
+// =======================================
+// LOCATION / ZONE LOOKUP
+// =======================================
+struct ZoneEntry { Hash hash; const wchar_t* name; };
+
+static const ZoneEntry g_knownZones[] = {
+	// States
+	{ 0, L"" }, // placeholder
+	// Towns
+};
+
+// Get location name at coordinates using _GET_MAP_ZONE_AT_COORDS
+static const wchar_t* GetLocationName(float x, float y, float z) {
+	// Try town first (type 1), then district (10), then state via hash matching
+	static const struct { int type; const wchar_t* prefix; } zoneTypes[] = {
+		{ 1, L"" },   // Town
+		{ 10, L"" },  // District
 	};
-	menu->AddItem(new MenuItemSetFormation("Column", GuardFormation::Column, L"column"));
-	menu->AddItem(new MenuItemSetFormation("Line", GuardFormation::Line, L"line"));
-	menu->AddItem(new MenuItemSetFormation("Wedge", GuardFormation::Wedge, L"wedge"));
-	return menu;
+
+	// Known zone hash-to-name mapping (comprehensive RDR2 map)
+	static const struct { const char* key; const wchar_t* name; } zoneNames[] = {
+		// Towns
+		{"valentine", L"Valentine"}, {"Blackwater", L"Blackwater"}, {"StDenis", L"Saint Denis"},
+		{"Rhodes", L"Rhodes"}, {"Strawberry", L"Strawberry"}, {"Annesburg", L"Annesburg"},
+		{"VANHORN", L"Van Horn"}, {"Armadillo", L"Armadillo"}, {"Tumbleweed", L"Tumbleweed"},
+		{"lagras", L"Lagras"}, {"cornwall", L"Cornwall"}, {"Emerald", L"Emerald Station"},
+		{"Butcher", L"Butcher Creek"}, {"wallace", L"Wallace Station"},
+		{"wapiti", L"Wapiti"}, {"Manzanita", L"Manzanita Post"}, {"Siska", L"Sisika"},
+		{"BeechersHope", L"Beechers Hope"}, {"Braithwaite", L"Braithwaite Manor"},
+		{"Caliga", L"Caliga Hall"}, {"Manicato", L"Manicato"},
+		// Districts / Regions
+		{"Heartlands", L"Heartlands"}, {"bigvalley", L"Big Valley"},
+		{"BluewaterMarsh", L"Bluewater Marsh"}, {"ChollaSpringsDLC", L"Cholla Springs"},
+		{"ChollaSpringsMercer", L"Cholla Springs"}, {"ChollaSpringsSouth", L"Cholla Springs"},
+		{"Cumberland", L"Cumberland Forest"}, {"GaptoothRidge", L"Gaptooth Ridge"},
+		{"greatPlains", L"Great Plains"}, {"GrizzliesEast", L"Grizzlies East"},
+		{"GrizzliesWest", L"Grizzlies West"}, {"HennigansSteadDLC", L"Hennigans Stead"},
+		{"HennigansSteadSouth", L"Hennigans Stead"}, {"Perdido", L"Perdido"},
+		{"PuntaOrgullo", L"Punta Orgullo"}, {"RioBravo", L"Rio Bravo"},
+		{"roanoke", L"Roanoke Ridge"}, {"scarletMeadows", L"Scarlett Meadows"},
+		{"TallTrees", L"Tall Trees"}, {"BayouNwa", L"Bayou Nwa"},
+		{"DiezCoronas", L"Diez Coronas"}, {"GuarmaD", L"Guarma"},
+		// States
+		{"Ambarino", L"Ambarino"}, {"Lemoyne", L"Lemoyne"},
+		{"NewAustin", L"New Austin"}, {"NewHanover", L"New Hanover"},
+		{"WestElizabeth", L"West Elizabeth"}, {"LowerWestElizabeth", L"West Elizabeth"},
+		{"UpperWestElizabeth", L"West Elizabeth"}, {"Guarma", L"Guarma"},
+		{"NuevoParaiso", L"Nuevo Paraiso"},
+	};
+	const int numZones = sizeof(zoneNames) / sizeof(zoneNames[0]);
+
+	// Try town (1) then district (10)
+	for (int typeIdx = 0; typeIdx < 2; typeIdx++) {
+		int zoneType = (typeIdx == 0) ? 1 : 10;
+		Hash zoneHash = invoke<Hash>(0x43AD8FC02B429D33, x, y, z, zoneType);
+		if (zoneHash == 0) continue;
+		for (int i = 0; i < numZones; i++) {
+			Hash knownHash = GAMEPLAY::GET_HASH_KEY(const_cast<char*>(zoneNames[i].key));
+			if (zoneHash == knownHash) return zoneNames[i].name;
+		}
+	}
+	return L"Wilderness";
 }
 
-static MenuBase* CreateGuardCommandsMenu(MenuController* controller)
+// Get full location string: "Valentine, facing North"
+static void GetFullLocationString(wchar_t* buf, int bufSize) {
+	Ped pp = PLAYER::PLAYER_PED_ID();
+	if (!ENTITY::DOES_ENTITY_EXIST(pp)) { swprintf_s(buf, bufSize, L"Unknown"); return; }
+	Vector3 pos = ENTITY::GET_ENTITY_COORDS(pp, TRUE, FALSE);
+	float heading = ENTITY::GET_ENTITY_HEADING(pp);
+	const wchar_t* location = GetLocationName(pos.x, pos.y, pos.z);
+	const wchar_t* compass = GetCompassDirection(heading);
+	swprintf_s(buf, bufSize, L"%s, facing %s", location, compass);
+}
+
+// =======================================
+// GLOBAL MODE HOTKEYS
+// =======================================
+
+static void HandleGlobalHotkeys() {
+	// Numpad 3: Current weapon
+	if (IsKeyJustUp(VK_NUMPAD3)) {
+		Ped playerPed = PLAYER::PLAYER_PED_ID();
+		if (!ENTITY::DOES_ENTITY_EXIST(playerPed)) { A11y::speak(L"No player", true); return; }
+		Hash weaponHash = 0;
+		WEAPON::GET_CURRENT_PED_WEAPON(playerPed, &weaponHash, TRUE, 0, FALSE);
+		const wchar_t* weaponName = GetWeaponName(weaponHash);
+
+		// Get ammo info
+		Hash ammoType = WEAPON::GET_PED_AMMO_TYPE_FROM_WEAPON(playerPed, weaponHash);
+		int ammo = WEAPON::GET_PED_AMMO_BY_TYPE(playerPed, ammoType);
+
+		wchar_t buf[200];
+		if (weaponHash == 0xD3BD8255) // unarmed
+			swprintf_s(buf, L"Unarmed");
+		else
+			swprintf_s(buf, L"%s. Ammo: %d", weaponName, ammo);
+		A11y::speak(buf, true);
+	}
+
+	// Numpad 7: Wanted status
+	if (IsKeyJustUp(VK_NUMPAD7)) {
+		Player player = PLAYER::PLAYER_ID();
+		int wantedLevel = PLAYER::GET_PLAYER_WANTED_LEVEL(player);
+		int bounty = PURSUIT::GET_PLAYER_PRICE_ON_A_HEAD(player) / 100;
+		int intensity = PURSUIT::GET_PLAYER_WANTED_INTENSITY(player);
+
+		wchar_t buf[200];
+		if (wantedLevel > 0 || bounty > 0 || intensity > 0) {
+			swprintf_s(buf, L"Wanted level %d. Bounty %d dollars. Intensity %d", wantedLevel, bounty, intensity);
+		} else {
+			swprintf_s(buf, L"Not wanted. No bounty.");
+		}
+		A11y::speak(buf, true);
+	}
+
+	// Numpad 4: Player status (health core, stamina core, deadeye core, money)
+	if (IsKeyJustUp(VK_NUMPAD4)) {
+		Ped playerPed = PLAYER::PLAYER_PED_ID();
+		if (!ENTITY::DOES_ENTITY_EXIST(playerPed)) { A11y::speak(L"No player", true); return; }
+
+		// Cores: 0=Health, 1=Stamina, 2=DeadEye
+		// _GET_ATTRIBUTE_CORE_VALUE hash: 0x36731AC041289BB1
+		int healthCore  = invoke<int>(0x36731AC041289BB1, playerPed, 0);
+		int staminaCore = invoke<int>(0x36731AC041289BB1, playerPed, 1);
+		int deadeyeCore = invoke<int>(0x36731AC041289BB1, playerPed, 2);
+
+		// Current health bar
+		int hp    = ENTITY::GET_ENTITY_HEALTH(playerPed);
+		int maxHp = ENTITY::GET_ENTITY_MAX_HEALTH(playerPed, FALSE);
+		int hpPct = (maxHp > 0) ? (hp * 100 / maxHp) : 0;
+
+		// Money: _MONEY_GET_CASH_BALANCE hash: 0x0C02DABFA3B98176
+		int moneyCents = invoke<int>(0x0C02DABFA3B98176);
+		int dollars = moneyCents / 100;
+		int cents = moneyCents % 100;
+
+		wchar_t buf[300];
+		swprintf_s(buf, L"Health %d%%. Health core %d. Stamina core %d. Deadeye core %d. Money %d dollars %d cents",
+			hpPct, healthCore, staminaCore, deadeyeCore, dollars, cents);
+		A11y::speak(buf, true);
+	}
+
+	// Numpad 6: Game time + stamina/deadeye bars
+	if (IsKeyJustUp(VK_NUMPAD6)) {
+		Ped playerPed = PLAYER::PLAYER_PED_ID();
+		int hours = TIME::GET_CLOCK_HOURS();
+		int minutes = TIME::GET_CLOCK_MINUTES();
+
+		// Stamina bar percentage
+		int stamPts = ATTRIBUTE::_0x219DA04BAA9CB065(playerPed, 1);
+		int stamMax = ATTRIBUTE::_0x223BF310F854871C(playerPed, 1);
+		int stamPct = (stamMax > 0) ? (stamPts * 100 / stamMax) : 0;
+
+		// Deadeye bar percentage
+		int dePts = ATTRIBUTE::_0x219DA04BAA9CB065(playerPed, 2);
+		int deMax = ATTRIBUTE::_0x223BF310F854871C(playerPed, 2);
+		int dePct = (deMax > 0) ? (dePts * 100 / deMax) : 0;
+
+		// Bounty check
+		Player player = PLAYER::PLAYER_ID();
+		int bounty = PURSUIT::GET_PLAYER_PRICE_ON_A_HEAD(player) / 100;
+
+		const wchar_t* period = (hours >= 6 && hours < 12) ? L"Morning" :
+		                        (hours >= 12 && hours < 18) ? L"Afternoon" :
+		                        (hours >= 18 && hours < 21) ? L"Evening" : L"Night";
+
+		wchar_t buf[300];
+		if (bounty > 0)
+			swprintf_s(buf, L"%s, %d:%02d. Stamina bar %d%%. Deadeye bar %d%%. Bounty %d dollars",
+				period, hours, minutes, stamPct, dePct, bounty);
+		else
+			swprintf_s(buf, L"%s, %d:%02d. Stamina bar %d%%. Deadeye bar %d%%. No bounty",
+				period, hours, minutes, stamPct, dePct);
+		A11y::speak(buf, true);
+	}
+
+	// Numpad 0: Current location and direction
+	if (IsKeyJustUp(VK_NUMPAD0)) {
+		wchar_t buf[300];
+		GetFullLocationString(buf, 300);
+		A11y::speak(buf, true);
+	}
+
+	// Numpad 9: Player honor
+	if (IsKeyJustUp(VK_NUMPAD9)) {
+		struct StatId {
+			ALIGN8 Hash BaseId;
+			ALIGN8 Hash PermId;
+		} statId;
+		statId.PermId = 0;
+
+		int honorVal = 0;
+		bool success = false;
+
+		// Try joaat("honor_current") = 0x89587b4e
+		statId.BaseId = 0x89587b4e;
+		if (invoke<BOOL>(0x767FBC2AC802EF3E, &statId, &honorVal)) {
+			DebugLog::log("Player honor queried with joaat(honor_current) 0x89587b4e: %d", honorVal);
+			success = true;
+		} else {
+			// Try fallback 0x7C045E1B
+			statId.BaseId = 0x7C045E1B;
+			if (invoke<BOOL>(0x767FBC2AC802EF3E, &statId, &honorVal)) {
+				DebugLog::log("Player honor queried with fallback 0x7C045E1B: %d", honorVal);
+				success = true;
+			}
+		}
+
+		if (success) {
+			const wchar_t* level = L"Neutral";
+			if (honorVal > 240)       level = L"Very High Honor";
+			else if (honorVal > 80)   level = L"High Honor";
+			else if (honorVal > 20)   level = L"Good Honor";
+			else if (honorVal >= -20) level = L"Neutral";
+			else if (honorVal >= -80) level = L"Low Honor";
+			else if (honorVal >= -240) level = L"Bad Honor";
+			else                      level = L"Very Bad Honor";
+
+			wchar_t buf[200];
+			swprintf_s(buf, L"Honor level %s. Value %d", level, honorVal);
+			A11y::speak(buf, true);
+		} else {
+			DebugLog::log("Failed to query player honor stat");
+			A11y::speak(L"Failed to read honor", true);
+		}
+	}
+}
+
+// =======================================
+// HORSE MODE HOTKEYS
+// =======================================
+
+static void HandleHorseHotkeys() {
+	Ped playerPed = PLAYER::PLAYER_PED_ID();
+	if (!ENTITY::DOES_ENTITY_EXIST(playerPed)) return;
+
+	// Try to get horse: mounted first, then last mount
+	Ped horse = 0;
+	if (PED::IS_PED_ON_MOUNT(playerPed)) {
+		horse = PED::GET_MOUNT(playerPed);
+	} else {
+		horse = GetPlayerHorse(playerPed);
+	}
+
+	bool hasHorse = (horse != 0 && ENTITY::DOES_ENTITY_EXIST(horse) && !ENTITY::IS_ENTITY_DEAD(horse));
+
+	// Numpad 1: Horse name, breed, and bonding level
+	if (IsKeyJustUp(VK_NUMPAD1)) {
+		if (!hasHorse) { A11y::speak(L"No horse nearby", true); return; }
+		Hash model = ENTITY::GET_ENTITY_MODEL(horse);
+		const wchar_t* horseName = GetHorseName(model);
+		// _GET_MOUNT_BONDING_LEVEL: 0x454AD4DA6C41B5BD - returns bonding level 1-4
+		int bondLevel = invoke<int>(0x454AD4DA6C41B5BD, horse);
+		if (bondLevel < 0) bondLevel = 0;
+		if (bondLevel > 4) bondLevel = 4;
+		
+		// Distance from player
+		Vector3 pPos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
+		Vector3 hPos = ENTITY::GET_ENTITY_COORDS(horse, TRUE, FALSE);
+		float dist = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(pPos.x, pPos.y, pPos.z, hPos.x, hPos.y, hPos.z, TRUE);
+		
+		wchar_t buf[300];
+		if (PED::IS_PED_ON_MOUNT(playerPed))
+			swprintf_s(buf, L"Mounted: %s. Bonding level %d", horseName, bondLevel);
+		else
+			swprintf_s(buf, L"Horse: %s. Bonding level %d. Distance %.0f meters", horseName, bondLevel, dist);
+		A11y::speak(buf, true);
+	}
+
+	// Numpad 4: Horse energy / stamina core
+	if (IsKeyJustUp(VK_NUMPAD4)) {
+		if (!hasHorse) { A11y::speak(L"No horse nearby", true); return; }
+
+		int hp    = ENTITY::GET_ENTITY_HEALTH(horse);
+		int maxHp = ENTITY::GET_ENTITY_MAX_HEALTH(horse, FALSE);
+		int hpPct = (maxHp > 0) ? (hp * 100 / maxHp) : 0;
+
+		// Horse cores: 0=Health, 1=Stamina
+		int healthCore  = invoke<int>(0x36731AC041289BB1, horse, 0);
+		int staminaCore = invoke<int>(0x36731AC041289BB1, horse, 1);
+
+		wchar_t buf[200];
+		if (staminaCore < 25)
+			swprintf_s(buf, L"Horse needs food! Health %d%%. Health core %d. Stamina core %d, low", hpPct, healthCore, staminaCore);
+		else
+			swprintf_s(buf, L"Horse health %d%%. Health core %d. Stamina core %d", hpPct, healthCore, staminaCore);
+		A11y::speak(buf, true);
+	}
+
+	// Numpad 2: Horse movement state and speed
+	if (IsKeyJustUp(VK_NUMPAD2)) {
+		if (!hasHorse) { A11y::speak(L"No horse nearby", true); return; }
+
+		float speed = ENTITY::GET_ENTITY_SPEED(horse);
+		wchar_t buf[128];
+		if (speed < 0.5f)
+			swprintf_s(buf, L"Horse idle");
+		else if (speed < 3.0f)
+			swprintf_s(buf, L"Horse walking, speed %.0f", speed);
+		else if (speed < 7.0f)
+			swprintf_s(buf, L"Horse trotting, speed %.0f", speed);
+		else if (speed < 12.0f)
+			swprintf_s(buf, L"Horse cantering, speed %.0f", speed);
+		else
+			swprintf_s(buf, L"Horse galloping, speed %.0f", speed);
+		A11y::speak(buf, true);
+	}
+
+	// Numpad 3: Horse stamina bar and overall condition
+	if (IsKeyJustUp(VK_NUMPAD3)) {
+		if (!hasHorse) { A11y::speak(L"No horse nearby", true); return; }
+
+		// Stamina bar (attribute points index 1)
+		int stamPts = ATTRIBUTE::_0x219DA04BAA9CB065(horse, 1);
+		int stamMax = ATTRIBUTE::_0x223BF310F854871C(horse, 1);
+		int stamPct = (stamMax > 0) ? (stamPts * 100 / stamMax) : 0;
+
+		// Health bar (attribute points index 0)
+		int hpPts = ATTRIBUTE::_0x219DA04BAA9CB065(horse, 0);
+		int hpMax = ATTRIBUTE::_0x223BF310F854871C(horse, 0);
+		int hpPct = (hpMax > 0) ? (hpPts * 100 / hpMax) : 0;
+
+		wchar_t buf[200];
+		if (stamPct < 25)
+			swprintf_s(buf, L"Horse tired! Stamina bar %d%%. Health bar %d%%", stamPct, hpPct);
+		else
+			swprintf_s(buf, L"Horse stamina bar %d%%. Health bar %d%%", stamPct, hpPct);
+		A11y::speak(buf, true);
+	}
+
+	// Numpad 0: Horse whistle / distance check
+	if (IsKeyJustUp(VK_NUMPAD0)) {
+		Ped pp = PLAYER::PLAYER_PED_ID();
+		if (!ENTITY::DOES_ENTITY_EXIST(pp)) return;
+		bool isMounted = PED::IS_PED_ON_MOUNT(pp) ? true : false;
+		if (isMounted) {
+			A11y::speak(L"Already mounted", true);
+			return;
+		}
+		Ped wHorse = invoke<Ped>(0x4C8B59171957BCF7, pp);
+		if (wHorse && ENTITY::DOES_ENTITY_EXIST(wHorse) && !ENTITY::IS_ENTITY_DEAD(wHorse)) {
+			Vector3 pPos = ENTITY::GET_ENTITY_COORDS(pp, TRUE, FALSE);
+			Vector3 hPos = ENTITY::GET_ENTITY_COORDS(wHorse, TRUE, FALSE);
+			float dist = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(pPos.x, pPos.y, pPos.z, hPos.x, hPos.y, hPos.z, TRUE);
+			wchar_t buf[200];
+			if (dist > 200.0f)
+				swprintf_s(buf, L"Horse too far! %.0f meters, out of range", dist);
+			else if (dist > 80.0f)
+				swprintf_s(buf, L"Horse called. %.0f meters, coming", dist);
+			else if (dist > 20.0f)
+				swprintf_s(buf, L"Horse called. %.0f meters, approaching", dist);
+			else
+				swprintf_s(buf, L"Horse nearby. %.0f meters", dist);
+			A11y::speak(buf, true);
+			g_horseWhistleActive = true;
+			g_horseWhistleStartMs = GetTickCount();
+			g_whistleTargetHorse = wHorse;
+		} else {
+			A11y::speak(L"No horse available", true);
+		}
+	}
+}
+
+// =======================================
+// NAVIGATION MODE HELPERS
+// =======================================
+
+// Calculate relative direction string from player to a target
+static const wchar_t* GetRelativeDirection(float playerHeading, float playerX, float playerY, float targetX, float targetY) {
+	float dx = targetX - playerX;
+	float dy = targetY - playerY;
+	float angleToTarget = atan2f(dx, dy) * (180.0f / 3.14159265f);
+	if (angleToTarget < 0) angleToTarget += 360.0f;
+	float rel = angleToTarget - playerHeading;
+	if (rel < 0) rel += 360.0f;
+	if (rel < 22.5f || rel >= 337.5f) return L"ahead";
+	else if (rel < 67.5f) return L"ahead right";
+	else if (rel < 112.5f) return L"to the right";
+	else if (rel < 157.5f) return L"behind right";
+	else if (rel < 202.5f) return L"behind";
+	else if (rel < 247.5f) return L"behind left";
+	else if (rel < 292.5f) return L"to the left";
+	else return L"ahead left";
+}
+
+// Sort POIs by distance from player (rebuilds sorted index array)
+static void RebuildNavSortedList(float px, float py, float pz) {
+	if (!g_navSortedIndices) {
+		g_navSortedIndices = new int[g_numNavPOIs];
+	}
+	// Fill with all indices
+	for (int i = 0; i < g_numNavPOIs; i++) g_navSortedIndices[i] = i;
+	g_navSortedCount = g_numNavPOIs;
+	// Simple bubble sort by distance
+	for (int i = 0; i < g_navSortedCount - 1; i++) {
+		for (int j = 0; j < g_navSortedCount - 1 - i; j++) {
+			int a = g_navSortedIndices[j], b = g_navSortedIndices[j + 1];
+			float da = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(px, py, pz, g_navPOIs[a].x, g_navPOIs[a].y, g_navPOIs[a].z, TRUE);
+			float db = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(px, py, pz, g_navPOIs[b].x, g_navPOIs[b].y, g_navPOIs[b].z, TRUE);
+			if (da > db) { g_navSortedIndices[j] = b; g_navSortedIndices[j + 1] = a; }
+		}
+	}
+	g_navCurrentPOI = 0;
+}
+
+// Announce current POI
+static void AnnounceCurrentPOI(Ped playerPed) {
+	if (g_navSortedCount == 0) return;
+	int idx = g_navSortedIndices[g_navCurrentPOI];
+	Vector3 pos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
+	float heading = ENTITY::GET_ENTITY_HEADING(playerPed);
+	float dist = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(pos.x, pos.y, pos.z, g_navPOIs[idx].x, g_navPOIs[idx].y, g_navPOIs[idx].z, TRUE);
+	const wchar_t* dir = GetRelativeDirection(heading, pos.x, pos.y, g_navPOIs[idx].x, g_navPOIs[idx].y);
+	wchar_t buf[400];
+	swprintf_s(buf, L"%d of %d. %s (%s). %.0f meters, %s",
+		g_navCurrentPOI + 1, g_navSortedCount, g_navPOIs[idx].name, g_navPOIs[idx].type, dist, dir);
+	A11y::speak(buf, true);
+	g_lastBrowsedMission = false;
+}
+
+// Sort missions by distance
+static void RebuildMissionSortedList(float px, float py, float pz) {
+	if (!g_missionSortedIndices) {
+		g_missionSortedIndices = new int[g_numNavMissions];
+	}
+	for (int i = 0; i < g_numNavMissions; i++) g_missionSortedIndices[i] = i;
+	g_missionSortedCount = g_numNavMissions;
+	for (int i = 0; i < g_missionSortedCount - 1; i++) {
+		for (int j = 0; j < g_missionSortedCount - 1 - i; j++) {
+			int a = g_missionSortedIndices[j], b = g_missionSortedIndices[j + 1];
+			float da = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(px, py, pz, g_navMissions[a].x, g_navMissions[a].y, g_navMissions[a].z, TRUE);
+			float db = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(px, py, pz, g_navMissions[b].x, g_navMissions[b].y, g_navMissions[b].z, TRUE);
+			if (da > db) { g_missionSortedIndices[j] = b; g_missionSortedIndices[j + 1] = a; }
+		}
+	}
+	g_navCurrentMission = 0;
+}
+
+// Announce current mission
+static void AnnounceCurrentMission(Ped playerPed) {
+	if (g_missionSortedCount == 0) return;
+	int idx = g_missionSortedIndices[g_navCurrentMission];
+	Vector3 pos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
+	float heading = ENTITY::GET_ENTITY_HEADING(playerPed);
+	float dist = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(pos.x, pos.y, pos.z, g_navMissions[idx].x, g_navMissions[idx].y, g_navMissions[idx].z, TRUE);
+	const wchar_t* dir = GetRelativeDirection(heading, pos.x, pos.y, g_navMissions[idx].x, g_navMissions[idx].y);
+	wchar_t buf[400];
+	swprintf_s(buf, L"%d of %d. %s (%s). %.0f meters, %s",
+		g_navCurrentMission + 1, g_missionSortedCount, g_navMissions[idx].name, g_navMissions[idx].type, dist, dir);
+	A11y::speak(buf, true);
+	g_lastBrowsedMission = true;
+}
+
+// =======================================
+// NAVIGATION MODE HOTKEYS
+// =======================================
+
+static void HandleNavigationHotkeys() {
+	Ped playerPed = PLAYER::PLAYER_PED_ID();
+	if (!ENTITY::DOES_ENTITY_EXIST(playerPed)) return;
+
+	// Numpad 0: Full location with coordinates
+	if (IsKeyJustUp(VK_NUMPAD0)) {
+		Vector3 pos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
+		float heading = ENTITY::GET_ENTITY_HEADING(playerPed);
+		const wchar_t* location = GetLocationName(pos.x, pos.y, pos.z);
+		const wchar_t* compass = GetCompassDirection(heading);
+		wchar_t buf[400];
+		swprintf_s(buf, L"%s, facing %s. Coordinates %.0f, %.0f", location, compass, pos.x, pos.y);
+		A11y::speak(buf, true);
+	}
+
+	// Numpad 1: Toggle auto-walk/ride forward
+	if (IsKeyJustUp(VK_NUMPAD1)) {
+		if (g_autoWalkActive) {
+			// Stop auto-walk
+			AI::CLEAR_PED_TASKS(playerPed, TRUE, FALSE);
+			AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(playerPed, TRUE);
+			if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(playerPed, FALSE);
+
+			bool mounted = PED::IS_PED_ON_MOUNT(playerPed);
+			if (mounted) {
+				Ped horse = PED::GET_MOUNT(playerPed);
+				if (horse) {
+					AI::CLEAR_PED_TASKS(horse, TRUE, FALSE);
+					AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(horse, TRUE);
+					if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(horse, FALSE);
+				}
+			}
+			g_autoWalkActive = false;
+			g_navToTargetActive = false;
+			A11y::speak(L"Auto walk off", true);
+		} else {
+			Vector3 pos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
+			float heading = ENTITY::GET_ENTITY_HEADING(playerPed);
+			float rad = heading * (3.14159265f / 180.0f);
+			float targetX = pos.x + sinf(rad) * 500.0f;
+			float targetY = pos.y + cosf(rad) * 500.0f;
+			float targetZ = pos.z;
+
+			bool mounted = PED::IS_PED_ON_MOUNT(playerPed);
+			float speed = mounted ? g_navSpeedValues[g_navHorseSpeedLevel] : 1.0f;
+			AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(playerPed, FALSE);
+			AI::SET_PED_PATH_AVOID_FIRE(playerPed, TRUE);
+			if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(playerPed, TRUE);
+
+			if (mounted) {
+				Ped horse = PED::GET_MOUNT(playerPed);
+				if (horse) {
+					AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(horse, FALSE);
+					AI::SET_PED_PATH_AVOID_FIRE(horse, TRUE);
+					if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(horse, TRUE);
+					AI::TASK_FOLLOW_NAV_MESH_TO_COORD(horse, targetX, targetY, targetZ, speed, -1, 2.0f, TRUE, 0.0f);
+				}
+			} else {
+				AI::TASK_FOLLOW_NAV_MESH_TO_COORD(playerPed, targetX, targetY, targetZ, speed, -1, 2.0f, TRUE, 0.0f);
+			}
+			g_autoWalkActive = true;
+			g_navToTargetActive = false;
+			A11y::speak(L"Auto walk on", true);
+		}
+	}
+
+	// Numpad 2: Auto-walk fast (run/gallop)
+	if (IsKeyJustUp(VK_NUMPAD2)) {
+		if (g_autoWalkActive) {
+			AI::CLEAR_PED_TASKS(playerPed, TRUE, FALSE);
+			AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(playerPed, TRUE);
+			if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(playerPed, FALSE);
+
+			bool mounted = PED::IS_PED_ON_MOUNT(playerPed);
+			if (mounted) {
+				Ped horse = PED::GET_MOUNT(playerPed);
+				if (horse) {
+					AI::CLEAR_PED_TASKS(horse, TRUE, FALSE);
+					AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(horse, TRUE);
+					if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(horse, FALSE);
+				}
+			}
+			g_autoWalkActive = false;
+			g_navToTargetActive = false;
+			A11y::speak(L"Auto run off", true);
+		} else {
+			Vector3 pos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
+			float heading = ENTITY::GET_ENTITY_HEADING(playerPed);
+			float rad = heading * (3.14159265f / 180.0f);
+			float targetX = pos.x + sinf(rad) * 1000.0f;
+			float targetY = pos.y + cosf(rad) * 1000.0f;
+			float targetZ = pos.z;
+
+			bool mounted = PED::IS_PED_ON_MOUNT(playerPed);
+			float speed = mounted ? 3.5f : 3.0f;
+			AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(playerPed, FALSE);
+			AI::SET_PED_PATH_AVOID_FIRE(playerPed, TRUE);
+			if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(playerPed, TRUE);
+
+			if (mounted) {
+				Ped horse = PED::GET_MOUNT(playerPed);
+				if (horse) {
+					AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(horse, FALSE);
+					AI::SET_PED_PATH_AVOID_FIRE(horse, TRUE);
+					if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(horse, TRUE);
+					AI::TASK_FOLLOW_NAV_MESH_TO_COORD(horse, targetX, targetY, targetZ, speed, -1, 2.0f, TRUE, 0.0f);
+				}
+			} else {
+				AI::TASK_FOLLOW_NAV_MESH_TO_COORD(playerPed, targetX, targetY, targetZ, speed, -1, 2.0f, TRUE, 0.0f);
+			}
+			g_autoWalkActive = true;
+			g_navToTargetActive = false;
+			A11y::speak(L"Auto run on", true);
+		}
+	}
+
+	// Numpad 3: Compass heading + speed
+	if (IsKeyJustUp(VK_NUMPAD3)) {
+		float heading = ENTITY::GET_ENTITY_HEADING(playerPed);
+		float compassDeg = heading;
+		if (compassDeg < 0) compassDeg += 360.0f;
+		const wchar_t* compass = GetCompassDirection(heading);
+		float speed = ENTITY::GET_ENTITY_SPEED(playerPed);
+		float speedKmh = speed * 3.6f;
+		bool mounted = PED::IS_PED_ON_MOUNT(playerPed);
+		const wchar_t* state;
+		if (mounted) {
+			Ped horse = PED::GET_MOUNT(playerPed);
+			if (horse && AI::IS_PED_SPRINTING(horse)) state = L"Galloping";
+			else if (horse && AI::IS_PED_RUNNING(horse)) state = L"Cantering";
+			else if (speed > 0.5f) state = L"Trotting";
+			else state = L"Stopped on horse";
+		} else {
+			if (AI::IS_PED_SPRINTING(playerPed)) state = L"Sprinting";
+			else if (AI::IS_PED_RUNNING(playerPed)) state = L"Running";
+			else if (AI::IS_PED_WALKING(playerPed)) state = L"Walking";
+			else state = L"Standing";
+		}
+		wchar_t buf[300];
+		swprintf_s(buf, L"%s, %.0f degrees. %s, %.0f km per hour", compass, compassDeg, state, speedKmh);
+		A11y::speak(buf, true);
+	}
+
+	// Numpad 4: Previous mission/stranger/activity
+	if (IsKeyJustUp(VK_NUMPAD4)) {
+		if (g_missionSortedCount == 0) {
+			Vector3 pos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
+			RebuildMissionSortedList(pos.x, pos.y, pos.z);
+		}
+		if (g_missionSortedCount > 0) {
+			g_navCurrentMission = (g_navCurrentMission - 1 + g_missionSortedCount) % g_missionSortedCount;
+			AnnounceCurrentMission(playerPed);
+		}
+	}
+
+	// Numpad 6: Next mission/stranger/activity
+	if (IsKeyJustUp(VK_NUMPAD6)) {
+		if (g_missionSortedCount == 0) {
+			Vector3 pos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
+			RebuildMissionSortedList(pos.x, pos.y, pos.z);
+		}
+		if (g_missionSortedCount > 0) {
+			g_navCurrentMission = (g_navCurrentMission + 1) % g_missionSortedCount;
+			AnnounceCurrentMission(playerPed);
+		}
+	}
+
+	// Numpad 7: Next POI in list
+	if (IsKeyJustUp(VK_NUMPAD7)) {
+		if (g_navSortedCount == 0) {
+			// Auto-build list on first use
+			Vector3 pos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
+			RebuildNavSortedList(pos.x, pos.y, pos.z);
+		}
+		if (g_navSortedCount > 0) {
+			g_navCurrentPOI = (g_navCurrentPOI + 1) % g_navSortedCount;
+			AnnounceCurrentPOI(playerPed);
+		}
+	}
+
+	// Numpad 9: Previous POI in list
+	if (IsKeyJustUp(VK_NUMPAD9)) {
+		if (g_navSortedCount == 0) {
+			Vector3 pos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
+			RebuildNavSortedList(pos.x, pos.y, pos.z);
+		}
+		if (g_navSortedCount > 0) {
+			g_navCurrentPOI = (g_navCurrentPOI - 1 + g_navSortedCount) % g_navSortedCount;
+			AnnounceCurrentPOI(playerPed);
+		}
+	}
+
+	// Numpad 8: Auto-navigate to last browsed item (POI or mission) — toggle on/off
+	if (IsKeyJustUp(VK_NUMPAD8)) {
+		// If currently navigating, stop
+		if (g_autoWalkActive) {
+			AI::CLEAR_PED_TASKS(playerPed, TRUE, FALSE);
+			AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(playerPed, TRUE);
+			if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(playerPed, FALSE);
+
+			bool mounted = PED::IS_PED_ON_MOUNT(playerPed);
+			if (mounted) {
+				Ped horse = PED::GET_MOUNT(playerPed);
+				if (horse) {
+					AI::CLEAR_PED_TASKS(horse, TRUE, FALSE);
+					AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(horse, TRUE);
+					if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(horse, FALSE);
+				}
+			}
+			g_autoWalkActive = false;
+			g_navToTargetActive = false;
+			A11y::speak(L"Navigation stopped", true);
+			DebugLog::log("Navigation stopped manually.");
+			return;
+		}
+
+		float tx, ty, tz;
+		const wchar_t* targetName = nullptr;
+
+		if (g_lastBrowsedMission) {
+			if (g_missionSortedCount == 0) {
+				A11y::speak(L"Press Numpad 6 to browse missions first", true);
+				return;
+			}
+			int idx = g_missionSortedIndices[g_navCurrentMission];
+			tx = g_navMissions[idx].x;
+			ty = g_navMissions[idx].y;
+			tz = g_navMissions[idx].z;
+			targetName = g_navMissions[idx].name;
+		} else {
+			if (g_navSortedCount == 0) {
+				A11y::speak(L"Press Numpad 7 to browse locations first", true);
+				return;
+			}
+			int idx = g_navSortedIndices[g_navCurrentPOI];
+			tx = g_navPOIs[idx].x;
+			ty = g_navPOIs[idx].y;
+			tz = g_navPOIs[idx].z;
+			targetName = g_navPOIs[idx].name;
+		}
+
+		Vector3 pos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
+		float dist = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(pos.x, pos.y, pos.z, tx, ty, tz, TRUE);
+
+		if (dist < 10.0f) {
+			A11y::speak(L"Already at location", true);
+			return;
+		}
+
+		// Navigate using navmesh (follows roads, avoids cliffs)
+		bool mounted = PED::IS_PED_ON_MOUNT(playerPed);
+		float speed = mounted ? g_navSpeedValues[g_navHorseSpeedLevel] : 1.0f;
+		
+		AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(playerPed, FALSE);
+		AI::SET_PED_PATH_AVOID_FIRE(playerPed, TRUE);
+		if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(playerPed, TRUE);
+
+		if (mounted) {
+			Ped horse = PED::GET_MOUNT(playerPed);
+			if (horse) {
+				AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(horse, FALSE);
+				AI::SET_PED_PATH_AVOID_FIRE(horse, TRUE);
+				if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(horse, TRUE);
+				AI::TASK_FOLLOW_NAV_MESH_TO_COORD(horse, tx, ty, tz, speed, -1, 5.0f, TRUE, 0.0f);
+				DebugLog::log("Started mounted auto-navigation: horse=%d to %ls (%f, %f, %f), speed=%.2f", horse, targetName, tx, ty, tz, speed);
+			}
+		} else {
+			AI::TASK_FOLLOW_NAV_MESH_TO_COORD(playerPed, tx, ty, tz, speed, -1, 5.0f, TRUE, 0.0f);
+			DebugLog::log("Started on-foot auto-navigation: player to %ls (%f, %f, %f), speed=%.2f", targetName, tx, ty, tz, speed);
+		}
+
+		g_navTargetX = tx;
+		g_navTargetY = ty;
+		g_navTargetZ = tz;
+		wcsncpy_s(g_navTargetName, targetName, 127);
+		g_navToTargetActive = true;
+		g_autoWalkActive = true;
+
+		wchar_t buf[400];
+		swprintf_s(buf, L"Navigating to %s. %.0f meters", targetName, dist);
+		A11y::speak(buf, true);
+	}
+}
+
+// =======================================
+// UNIFIED NUMPAD MODE HANDLER
+// =======================================
+
+static void HandleNumpadModes() {
+	// Numpad 5: Switch mode
+	if (IsKeyJustUp(VK_NUMPAD5)) {
+		int m = (int)g_currentNumpadMode;
+		m = (m + 1) % 4;
+		g_currentNumpadMode = (NumpadMode)m;
+		A11y::speak(GetModeName(g_currentNumpadMode), true);
+		return; // consume the key
+	}
+
+	// Dispatch to active mode
+	switch (g_currentNumpadMode) {
+		case NumpadMode::Bodyguard:
+			HandleSquadHotkeys();
+			break;
+		case NumpadMode::Global:
+			HandleGlobalHotkeys();
+			break;
+		case NumpadMode::Horse:
+			HandleHorseHotkeys();
+			break;
+		case NumpadMode::Navigation:
+			HandleNavigationHotkeys();
+			break;
+	}
+}
+
+// =======================================
+// END OF SQUAD SYSTEM
+// =======================================
+
+// =======================================
+// ACCESSIBILITY MENU TOGGLE CLASSES
+// =======================================
+class MenuItemAutoMoneyToggle : public MenuItemSwitchable
 {
-	auto menu = new MenuBase(new MenuItemListTitle("COMMANDS"));
+	virtual void OnSelect() {
+		g_autoMoneyAnnounce = !g_autoMoneyAnnounce;
+		SetState(g_autoMoneyAnnounce);
+		A11y::speak(g_autoMoneyAnnounce ? L"Money announcements on" : L"Money announcements off", true);
+	}
+public:
+	MenuItemAutoMoneyToggle(string caption) : MenuItemSwitchable(caption) { SetState(g_autoMoneyAnnounce); }
+};
+
+class MenuItemAutoHorseStateToggle : public MenuItemSwitchable
+{
+	virtual void OnSelect() {
+		g_autoHorseStateAnnounce = !g_autoHorseStateAnnounce;
+		SetState(g_autoHorseStateAnnounce);
+		A11y::speak(g_autoHorseStateAnnounce ? L"Horse state announcements on" : L"Horse state announcements off", true);
+	}
+public:
+	MenuItemAutoHorseStateToggle(string caption) : MenuItemSwitchable(caption) { SetState(g_autoHorseStateAnnounce); }
+};
+
+class MenuItemAutoGuardStatusToggle : public MenuItemSwitchable
+{
+	virtual void OnSelect() {
+		g_autoGuardStatusAnnounce = !g_autoGuardStatusAnnounce;
+		SetState(g_autoGuardStatusAnnounce);
+		A11y::speak(g_autoGuardStatusAnnounce ? L"Guard status announcements on" : L"Guard status announcements off", true);
+	}
+public:
+	MenuItemAutoGuardStatusToggle(string caption) : MenuItemSwitchable(caption) { SetState(g_autoGuardStatusAnnounce); }
+};
+
+class MenuItemAutoHorseCallToggle : public MenuItemSwitchable
+{
+	virtual void OnSelect() {
+		g_autoHorseCallAnnounce = !g_autoHorseCallAnnounce;
+		SetState(g_autoHorseCallAnnounce);
+		A11y::speak(g_autoHorseCallAnnounce ? L"Horse call announcements on" : L"Horse call announcements off", true);
+	}
+public:
+	MenuItemAutoHorseCallToggle(string caption) : MenuItemSwitchable(caption) { SetState(g_autoHorseCallAnnounce); }
+};
+
+class MenuItemAutoCompassToggle : public MenuItemSwitchable
+{
+	virtual void OnSelect() {
+		g_autoCompassAnnounce = !g_autoCompassAnnounce;
+		SetState(g_autoCompassAnnounce);
+		A11y::speak(g_autoCompassAnnounce ? L"Compass announcements on" : L"Compass announcements off", true);
+	}
+public:
+	MenuItemAutoCompassToggle(string caption) : MenuItemSwitchable(caption) { SetState(g_autoCompassAnnounce); }
+};
+
+class MenuItemAutoAnimalBehaviorToggle : public MenuItemSwitchable
+{
+	virtual void OnSelect() {
+		g_autoAnimalBehaviorAnnounce = !g_autoAnimalBehaviorAnnounce;
+		SetState(g_autoAnimalBehaviorAnnounce);
+		A11y::speak(g_autoAnimalBehaviorAnnounce ? L"Animal behavior announcements on" : L"Animal behavior announcements off", true);
+	}
+public:
+	MenuItemAutoAnimalBehaviorToggle(string caption) : MenuItemSwitchable(caption) { SetState(g_autoAnimalBehaviorAnnounce); }
+};
+
+class MenuItemAutoHonorToggle : public MenuItemSwitchable
+{
+	virtual void OnSelect() {
+		g_autoHonorAnnounce = !g_autoHonorAnnounce;
+		SetState(g_autoHonorAnnounce);
+		A11y::speak(g_autoHonorAnnounce ? L"Honor announcements on" : L"Honor announcements off", true);
+	}
+public:
+	MenuItemAutoHonorToggle(string caption) : MenuItemSwitchable(caption) { SetState(g_autoHonorAnnounce); }
+};
+
+class MenuItemAutoLootToggle : public MenuItemSwitchable
+{
+	virtual void OnSelect() {
+		g_autoLootAnnounce = !g_autoLootAnnounce;
+		SetState(g_autoLootAnnounce);
+		A11y::speak(g_autoLootAnnounce ? L"Loot announcements on" : L"Loot announcements off", true);
+	}
+public:
+	MenuItemAutoLootToggle(string caption) : MenuItemSwitchable(caption) { SetState(g_autoLootAnnounce); }
+};
+
+class MenuItemAutoAimToggle : public MenuItemSwitchable
+{
+	virtual void OnSelect() {
+		g_autoAimEnabled = !g_autoAimEnabled;
+		SetState(g_autoAimEnabled);
+		if (g_autoAimEnabled) {
+			PLAYER::SET_PLAYER_LOCKON(PLAYER::PLAYER_ID(), TRUE);
+			PLAYER::SET_PLAYER_LOCKON_RANGE_OVERRIDE(PLAYER::PLAYER_ID(), 150.0f);
+		}
+		A11y::speak(g_autoAimEnabled ? L"Auto aim on" : L"Auto aim off", true);
+	}
+public:
+	MenuItemAutoAimToggle(string caption) : MenuItemSwitchable(caption) { SetState(g_autoAimEnabled); }
+};
+
+class MenuItemNavIgnoreNPCsToggle : public MenuItemSwitchable
+{
+	virtual void OnSelect() {
+		g_navIgnoreNPCs = !g_navIgnoreNPCs;
+		SetState(g_navIgnoreNPCs);
+		A11y::speak(g_navIgnoreNPCs ? L"Ignore NPCs on" : L"Ignore NPCs off", true);
+	}
+public:
+	MenuItemNavIgnoreNPCsToggle(string caption) : MenuItemSwitchable(caption) { SetState(g_navIgnoreNPCs); }
+};
+
+class MenuItemNavHorseSpeed : public MenuItemDefault
+{
+	virtual void OnSelect() {
+		g_navHorseSpeedLevel = (g_navHorseSpeedLevel + 1) % 4;
+		wchar_t buf[100];
+		swprintf_s(buf, L"Horse speed: %s", g_navSpeedNames[g_navHorseSpeedLevel]);
+		A11y::speak(buf, true);
+	}
+public:
+	MenuItemNavHorseSpeed(string caption) : MenuItemDefault(caption) {}
+};
+
+MenuBase *CreateNavSettingsMenu(MenuController *controller) {
+	auto menu = new MenuBase(new MenuItemTitle("AUTO NAVIGATION SETTINGS"));
 	controller->RegisterMenu(menu);
-	menu->AddItem(new MenuItemSpeakOnSelect("Follow", L"follow"));
-	menu->AddItem(new MenuItemSpeakOnSelect("Hold", L"hold"));
-	menu->AddItem(new MenuItemSpeakOnSelect("Defend me", L"defend me"));
-	menu->AddItem(new MenuItemSpeakOnSelect("Guard area", L"guard area"));
-	menu->AddItem(new MenuItemSpeakOnSelect("Attack aimed target", L"attack aimed target"));
+	menu->AddItem(new MenuItemNavIgnoreNPCsToggle("IGNORE NPCS"));
+	menu->AddItem(new MenuItemNavHorseSpeed("HORSE SPEED"));
 	return menu;
 }
 
-static MenuBase* CreateGuardManagerMenu(MenuController* controller)
-{
-	auto menu = new MenuBase(new MenuItemTitle("GUARD  MANAGER"));
-	controller->RegisterMenu(menu);
-	menu->AddItem(new MenuItemMenu("SQUADS", CreateGuardSquadsMenu(controller)));
-	menu->AddItem(new MenuItemMenu("GUARDS", CreateGuardRosterMenu(controller)));
-	menu->AddItem(new MenuItemMenu("WEAPONS", CreateGuardWeaponsMenu(controller)));
-	menu->AddItem(new MenuItemMenu("MOUNTS", CreateGuardMountsMenu(controller)));
-	menu->AddItem(new MenuItemMenu("FORMATIONS", CreateGuardFormationsMenu(controller)));
-	menu->AddItem(new MenuItemMenu("COMMANDS", CreateGuardCommandsMenu(controller)));
-	return menu;
-}
-
-MenuBase *CreateAccessibilityMenu(MenuController *controller)
-{
+MenuBase *CreateAccessibilityMenu(MenuController *controller) {
 	auto menu = new MenuBase(new MenuItemTitle("ACCESSIBILITY"));
 	controller->RegisterMenu(menu);
-
-	// Top-level master speech switch (default ON)
-	menu->AddItem(new MenuItemA11yMasterSwitch("Enable accessibility (speech)"));
-
-	// Group: Aiming
-	menu->AddItem(new MenuItemTitle("AIMING"));
-	menu->AddItem(new MenuItemA11yAimingCues("Target type sound cues"));
-
-	// Group: Navigation
-	menu->AddItem(new MenuItemTitle("NAVIGATION"));
-	menu->AddItem(new MenuItemA11yAutoZones("Auto place/zone announcements"));
-	menu->AddItem(new MenuItemA11yAutoHeading("Auto heading announcements"));
-	
-	// Group: Inventory
-	menu->AddItem(new MenuItemTitle("INVENTORY"));
-	menu->AddItem(new MenuItemA11yInventoryMonitoring("Auto inventory change announcements"));
-	menu->AddItem(new MenuItemA11yGroundItemScanning("Ground item scanning (NumPad 0)"));
-	menu->AddItem(new MenuItemA11yPickupAnnouncements("Auto pickup announcements"));
-
-	// Future groups can be added here (navigation, combat assist, etc.)
+	menu->AddItem(new MenuItemAutoAimToggle("AUTO AIM"));
+	menu->AddItem(new MenuItemAutoMoneyToggle("AUTO MONEY ANNOUNCE"));
+	menu->AddItem(new MenuItemAutoHorseStateToggle("AUTO HORSE STATE"));
+	menu->AddItem(new MenuItemAutoGuardStatusToggle("AUTO GUARD STATUS"));
+	menu->AddItem(new MenuItemAutoHorseCallToggle("AUTO HORSE CALL"));
+	menu->AddItem(new MenuItemAutoCompassToggle("AUTO COMPASS"));
+	menu->AddItem(new MenuItemAutoAnimalBehaviorToggle("AUTO ANIMAL BEHAVIOR"));
+	menu->AddItem(new MenuItemAutoHonorToggle("AUTO HONOR ANNOUNCE"));
+	menu->AddItem(new MenuItemAutoLootToggle("AUTO LOOT ANNOUNCE"));
+	menu->AddItem(new MenuItemMenu("AUTO NAVIGATION SETTINGS", CreateNavSettingsMenu(controller)));
 	return menu;
+}
+
+// =======================================
+// AUTO-ANNOUNCEMENT FUNCTIONS
+// =======================================
+
+static void HandleAutoMoneyAnnounce() {
+	if (!g_autoMoneyAnnounce) return;
+	DWORD now = GetTickCount();
+	if ((now - g_lastMoneyCheckMs) < 1500) return;
+	g_lastMoneyCheckMs = now;
+
+	int currentCents = invoke<int>(0x0C02DABFA3B98176); // _MONEY_GET_CASH_BALANCE
+	if (g_lastMoneyCents < 0) { g_lastMoneyCents = currentCents; return; } // first run init
+
+	int diff = currentCents - g_lastMoneyCents;
+	if (diff == 0) return;
+
+	int absDollars = (diff > 0 ? diff : -diff) / 100;
+	int absCents = (diff > 0 ? diff : -diff) % 100;
+	int totalDollars = currentCents / 100;
+
+	if (absDollars == 0 && absCents == 0) { g_lastMoneyCents = currentCents; return; }
+
+	wchar_t buf[256];
+	if (diff > 0) {
+		if (absCents > 0)
+			swprintf_s(buf, L"Earned %d dollars %d cents. Total %d dollars", absDollars, absCents, totalDollars);
+		else
+			swprintf_s(buf, L"Earned %d dollars. Total %d dollars", absDollars, totalDollars);
+	} else {
+		if (absCents > 0)
+			swprintf_s(buf, L"Spent %d dollars %d cents. Total %d dollars", absDollars, absCents, totalDollars);
+		else
+			swprintf_s(buf, L"Spent %d dollars. Total %d dollars", absDollars, totalDollars);
+	}
+	A11y::speak(buf, false);
+	g_lastMoneyCents = currentCents;
+}
+
+static void HandleAutoHorseStateAnnounce() {
+	if (!g_autoHorseStateAnnounce) return;
+	DWORD now = GetTickCount();
+	if ((now - g_lastHorseStateCheckMs) < 1000) return;
+	g_lastHorseStateCheckMs = now;
+
+	Ped playerPed = PLAYER::PLAYER_PED_ID();
+	if (!ENTITY::DOES_ENTITY_EXIST(playerPed)) return;
+	if (!PED::IS_PED_ON_MOUNT(playerPed)) {
+		g_lastHorseStateId = -1; // reset when not mounted
+		return;
+	}
+
+	Ped horse = PED::GET_MOUNT(playerPed);
+	if (!horse || !ENTITY::DOES_ENTITY_EXIST(horse)) return;
+
+	float speed = ENTITY::GET_ENTITY_SPEED(horse);
+	int stateId;
+	const wchar_t* stateName;
+	if (speed < 0.5f)       { stateId = 0; stateName = L"Horse idle"; }
+	else if (speed < 3.0f)  { stateId = 1; stateName = L"Horse walking"; }
+	else if (speed < 7.0f)  { stateId = 2; stateName = L"Horse trotting"; }
+	else if (speed < 12.0f) { stateId = 3; stateName = L"Horse cantering"; }
+	else                    { stateId = 4; stateName = L"Horse galloping"; }
+
+	if (stateId != g_lastHorseStateId) {
+		A11y::speak(stateName, false);
+		g_lastHorseStateId = stateId;
+	}
+}
+
+static void HandleAutoGuardStatusAnnounce() {
+	if (!g_autoGuardStatusAnnounce) return;
+	if (g_activeSquad < 0 || g_activeSquad >= (int)g_squads.size()) return;
+	DWORD now = GetTickCount();
+	if ((now - g_lastGuardAutoStatusMs) < 3000) return;
+	g_lastGuardAutoStatusMs = now;
+
+	int alive = 0, fighting = 0;
+	for (auto &gi : g_squads[g_activeSquad].guards) {
+		if (!gi.ped || !ENTITY::DOES_ENTITY_EXIST(gi.ped) || ENTITY::IS_ENTITY_DEAD(gi.ped)) continue;
+		alive++;
+		if (PED::IS_PED_IN_COMBAT(gi.ped, 0)) fighting++;
+	}
+
+	// Only announce changes
+	if (alive == g_lastAliveCount && fighting == g_lastFightingCount) return;
+
+	// Detect significant events
+	if (g_lastAliveCount >= 0) {
+		if (fighting > 0 && g_lastFightingCount == 0) {
+			wchar_t buf[128];
+			swprintf_s(buf, L"Guards in combat! %d fighting", fighting);
+			A11y::speak(buf, true);
+		} else if (fighting == 0 && g_lastFightingCount > 0) {
+			A11y::speak(L"Guards combat ended", false);
+		} else if (alive < g_lastAliveCount) {
+			wchar_t buf[128];
+			swprintf_s(buf, L"Guard down! %d remaining", alive);
+			A11y::speak(buf, true);
+		}
+	}
+
+	g_lastAliveCount = alive;
+	g_lastFightingCount = fighting;
+}
+
+// =======================================
+// ANIMAL GUARD BEHAVIOR ANNOUNCEMENTS
+// =======================================
+
+// Determine animal type from model hash
+static const wchar_t* GetAnimalTypeName(Ped ped) {
+	Hash model = ENTITY::GET_ENTITY_MODEL(ped);
+	if (model == GAMEPLAY::GET_HASH_KEY("A_C_WOLF")) return L"Wolf";
+	if (model == GAMEPLAY::GET_HASH_KEY("A_C_WOLF_MEDIUM")) return L"Wolf";
+	if (model == GAMEPLAY::GET_HASH_KEY("A_C_WOLF_SMALL")) return L"Small wolf";
+	if (model == GAMEPLAY::GET_HASH_KEY("A_C_COUGAR_01")) return L"Cougar";
+	if (model == GAMEPLAY::GET_HASH_KEY("A_C_PANTHER_01")) return L"Panther";
+	return nullptr; // not an animal guard
+}
+
+// Behavior IDs: 0=idle, 1=prowling, 2=running, 3=growling(combat), 4=attacking(melee), 5=howling(stopped+not combat)
+static int GetAnimalBehavior(Ped ped) {
+	if (PED::IS_PED_IN_MELEE_COMBAT(ped))  return 4; // attacking / mauling
+	if (PED::IS_PED_IN_COMBAT(ped, 0))     return 3; // growling / aggressive
+	if (AI::IS_PED_SPRINTING(ped))         return 2; // running / chasing
+	if (AI::IS_PED_RUNNING(ped))           return 2; // running
+	if (AI::IS_PED_WALKING(ped))           return 1; // prowling / stalking
+	if (PED::IS_PED_STOPPED(ped))          return 5; // idle / howling
+	return 0; // idle
+}
+
+static const wchar_t* GetAnimalBehaviorText(const wchar_t* animalName, int behavior, bool isCanine) {
+	static wchar_t buf[200];
+	switch (behavior) {
+		case 1: swprintf_s(buf, L"%s prowling", animalName); break;
+		case 2: swprintf_s(buf, L"%s chasing!", animalName); break;
+		case 3:
+			if (isCanine)
+				swprintf_s(buf, L"%s growling!", animalName);
+			else
+				swprintf_s(buf, L"%s snarling!", animalName);
+			break;
+		case 4:
+			if (isCanine)
+				swprintf_s(buf, L"%s attacking!", animalName);
+			else
+				swprintf_s(buf, L"%s mauling!", animalName);
+			break;
+		case 5:
+			if (isCanine)
+				swprintf_s(buf, L"%s howling", animalName);
+			else
+				swprintf_s(buf, L"%s resting", animalName);
+			break;
+		default: swprintf_s(buf, L"%s idle", animalName); break;
+	}
+	return buf;
+}
+
+static void HandleAutoAnimalBehaviorAnnounce() {
+	if (!g_autoAnimalBehaviorAnnounce) return;
+	if (g_activeSquad < 0 || g_activeSquad >= (int)g_squads.size()) return;
+	DWORD now = GetTickCount();
+	if ((now - g_lastAnimalBehaviorCheckMs) < 2000) return;
+	g_lastAnimalBehaviorCheckMs = now;
+
+	for (auto &gi : g_squads[g_activeSquad].guards) {
+		if (!gi.ped || !ENTITY::DOES_ENTITY_EXIST(gi.ped) || ENTITY::IS_ENTITY_DEAD(gi.ped)) continue;
+		const wchar_t* animalName = GetAnimalTypeName(gi.ped);
+		if (!animalName) continue; // not an animal
+
+		Hash model = ENTITY::GET_ENTITY_MODEL(gi.ped);
+		bool isCanine = (model == GAMEPLAY::GET_HASH_KEY("A_C_WOLF")
+					  || model == GAMEPLAY::GET_HASH_KEY("A_C_WOLF_MEDIUM")
+					  || model == GAMEPLAY::GET_HASH_KEY("A_C_WOLF_SMALL"));
+
+		int behavior = GetAnimalBehavior(gi.ped);
+		int pedKey = (int)gi.ped;
+
+		// Only announce on state change
+		auto it = g_animalLastBehavior.find(pedKey);
+		if (it != g_animalLastBehavior.end() && it->second == behavior) continue;
+
+		// Skip initial idle announce (don't spam on spawn)
+		if (it == g_animalLastBehavior.end() && (behavior == 0 || behavior == 5)) {
+			g_animalLastBehavior[pedKey] = behavior;
+			continue;
+		}
+
+		const wchar_t* text = GetAnimalBehaviorText(animalName, behavior, isCanine);
+		bool interrupt = (behavior >= 3); // interrupt speech for combat states
+		A11y::speak(text, interrupt);
+		g_animalLastBehavior[pedKey] = behavior;
+	}
+}
+
+static void HandleAutoHonorAnnounce() {
+	if (!g_autoHonorAnnounce) return;
+	DWORD now = GetTickCount();
+	if ((now - g_lastHonorCheckMs) < 2000) return;
+	g_lastHonorCheckMs = now;
+
+	int honorVal = 0;
+	bool success = false;
+	
+	struct StatId {
+		ALIGN8 Hash BaseId;
+		ALIGN8 Hash PermId;
+	} statId;
+	statId.PermId = 0;
+
+	statId.BaseId = 0x89587b4e;
+	if (invoke<BOOL>(0x767FBC2AC802EF3E, &statId, &honorVal)) {
+		success = true;
+	} else {
+		statId.BaseId = 0x7C045E1B;
+		if (invoke<BOOL>(0x767FBC2AC802EF3E, &statId, &honorVal)) {
+			success = true;
+		}
+	}
+
+	if (success) {
+		if (g_lastPlayerHonor == -9999) {
+			g_lastPlayerHonor = honorVal;
+			return;
+		}
+
+		if (honorVal != g_lastPlayerHonor) {
+			int diff = honorVal - g_lastPlayerHonor;
+			g_lastPlayerHonor = honorVal;
+
+			const wchar_t* level = L"Neutral";
+			if (honorVal > 240)       level = L"Very High Honor";
+			else if (honorVal > 80)   level = L"High Honor";
+			else if (honorVal > 20)   level = L"Good Honor";
+			else if (honorVal >= -20) level = L"Neutral";
+			else if (honorVal >= -80) level = L"Low Honor";
+			else if (honorVal >= -240) level = L"Bad Honor";
+			else                      level = L"Very Bad Honor";
+
+			wchar_t buf[256];
+			if (diff > 0) {
+				swprintf_s(buf, L"Honor increased. New level %s. Value %d", level, honorVal);
+			} else {
+				swprintf_s(buf, L"Honor decreased. New level %s. Value %d", level, honorVal);
+			}
+			A11y::speak(buf, false);
+			DebugLog::log("Auto honor change detected. Old: %d, New: %d", g_lastPlayerHonor - diff, honorVal);
+		}
+	}
+}
+
+// Structures and globals for Loot item tracking
+struct MonitoredItem {
+	const char* codeName;
+	Hash hash;
+	const wchar_t* displayName;
+};
+
+static inline char my_toupper(char c) {
+	if (c >= 'a' && c <= 'z') return c - 'a' + 'A';
+	return c;
+}
+
+static Hash CalculateJoaat(const char* str) {
+	Hash hash = 0;
+	while (*str) {
+		hash += my_toupper((unsigned char)*str);
+		hash += (hash << 10);
+		hash ^= (hash >> 6);
+		str++;
+	}
+	hash += (hash << 3);
+	hash ^= (hash >> 11);
+	hash += (hash << 15);
+	return hash;
+}
+
+static MonitoredItem g_monitoredItems[] = {
+	// Revolver Ammo
+	{ "AMMO_REVOLVER", 0, L"Revolver Cartridges" },
+	{ "AMMO_REVOLVER_EXPRESS", 0, L"Express Revolver Cartridges" },
+	{ "AMMO_REVOLVER_HIGH_VELOCITY", 0, L"High Velocity Revolver Cartridges" },
+	{ "AMMO_REVOLVER_SPLIT_POINT", 0, L"Split Point Revolver Cartridges" },
+	{ "AMMO_REVOLVER_EXPRESS_EXPLOSIVE", 0, L"Explosive Revolver Cartridges" },
+
+	// Pistol Ammo
+	{ "AMMO_PISTOL", 0, L"Pistol Cartridges" },
+	{ "AMMO_PISTOL_EXPRESS", 0, L"Express Pistol Cartridges" },
+	{ "AMMO_PISTOL_HIGH_VELOCITY", 0, L"High Velocity Pistol Cartridges" },
+	{ "AMMO_PISTOL_SPLIT_POINT", 0, L"Split Point Pistol Cartridges" },
+	{ "AMMO_PISTOL_EXPRESS_EXPLOSIVE", 0, L"Explosive Pistol Cartridges" },
+
+	// Repeater Ammo
+	{ "AMMO_REPEATER", 0, L"Repeater Cartridges" },
+	{ "AMMO_REPEATER_EXPRESS", 0, L"Express Repeater Cartridges" },
+	{ "AMMO_REPEATER_HIGH_VELOCITY", 0, L"High Velocity Repeater Cartridges" },
+	{ "AMMO_REPEATER_SPLIT_POINT", 0, L"Split Point Repeater Cartridges" },
+	{ "AMMO_REPEATER_EXPRESS_EXPLOSIVE", 0, L"Explosive Repeater Cartridges" },
+
+	// Rifle Ammo
+	{ "AMMO_RIFLE", 0, L"Rifle Cartridges" },
+	{ "AMMO_RIFLE_EXPRESS", 0, L"Express Rifle Cartridges" },
+	{ "AMMO_RIFLE_HIGH_VELOCITY", 0, L"High Velocity Rifle Cartridges" },
+	{ "AMMO_RIFLE_SPLIT_POINT", 0, L"Split Point Rifle Cartridges" },
+	{ "AMMO_RIFLE_EXPRESS_EXPLOSIVE", 0, L"Explosive Rifle Cartridges" },
+
+	// Shotgun Ammo
+	{ "AMMO_SHOTGUN", 0, L"Shotgun Shells" },
+	{ "AMMO_SHOTGUN_SLUG", 0, L"Shotgun Slugs" },
+	{ "AMMO_SHOTGUN_BUCKSHOT_INCENDIARY", 0, L"Incendiary Shotgun Shells" },
+	{ "AMMO_SHOTGUN_SLUG_EXPLOSIVE", 0, L"Explosive Shotgun Slugs" },
+
+	// Arrows
+	{ "AMMO_ARROW", 0, L"Arrows" },
+	{ "AMMO_ARROW_IMPROVED", 0, L"Improved Arrows" },
+	{ "AMMO_ARROW_SMALL_GAME", 0, L"Small Game Arrows" },
+	{ "AMMO_ARROW_FIRE", 0, L"Fire Arrows" },
+	{ "AMMO_ARROW_POISON", 0, L"Poison Arrows" },
+	{ "AMMO_ARROW_DYNAMITE", 0, L"Dynamite Arrows" },
+
+	// Throwables / Weapons
+	{ "WEAPON_DYNAMITE", 0, L"Dynamite" },
+	{ "WEAPON_DYNAMITE_VOLATILE", 0, L"Volatile Dynamite" },
+	{ "WEAPON_TOMAHAWK", 0, L"Tomahawk" },
+	{ "WEAPON_THROWING_KNIFE", 0, L"Throwing Knife" },
+	{ "WEAPON_FIREBOTTLE", 0, L"Fire Bottle" },
+
+	// Valuables
+	{ "VALUABLE_GOLD_RING", 0, L"Gold Ring" },
+	{ "VALUABLE_SILVER_RING", 0, L"Silver Ring" },
+	{ "VALUABLE_PLATINUM_RING", 0, L"Platinum Ring" },
+	{ "VALUABLE_GOLD_WATCH", 0, L"Gold Watch" },
+	{ "VALUABLE_SILVER_WATCH", 0, L"Silver Watch" },
+	{ "VALUABLE_PLATINUM_WATCH", 0, L"Platinum Watch" },
+	{ "VALUABLE_GOLD_TOOTH", 0, L"Gold Tooth" },
+	{ "VALUABLE_GOLD_BAR", 0, L"Gold Bar" },
+	{ "VALUABLE_GOLD_NUGGET", 0, L"Gold Nugget" },
+	{ "VALUABLE_SILVER_BUCKLE", 0, L"Silver Buckle" },
+	{ "VALUABLE_GOLD_BUCKLE", 0, L"Gold Buckle" },
+	{ "VALUABLE_JEWELRY_LARGE", 0, L"Large Jewelry" },
+	{ "VALUABLE_JEWELRY_SMALL", 0, L"Small Jewelry" },
+
+	// Provisions: Tobacco/Cigars
+	{ "PROVISION_CIGAR", 0, L"Cigar" },
+	{ "PROVISION_CIGARETTE", 0, L"Cigarette" },
+	{ "PROVISION_CHEWING_TOBACCO", 0, L"Chewing Tobacco" },
+	{ "PROVISION_CIGARETTES", 0, L"Cigarettes" },
+	{ "PROVISION_CIGARETTES_BOX", 0, L"Premium Cigarettes" },
+
+	// Provisions: Alcohol
+	{ "PROVISION_WHISKEY", 0, L"Whiskey" },
+	{ "PROVISION_GIN", 0, L"Gin" },
+	{ "PROVISION_FINE_BRANDY", 0, L"Fine Brandy" },
+	{ "PROVISION_GUARMA_RUM", 0, L"Guarma Rum" },
+
+	// Provisions: Food
+	{ "PROVISION_CANNED_PEACHES", 0, L"Canned Peaches" },
+	{ "PROVISION_CANNED_PINEAPPLES", 0, L"Canned Pineapples" },
+	{ "PROVISION_CANNED_APRICOTS", 0, L"Canned Apricots" },
+	{ "PROVISION_CANNED_BEANS", 0, L"Canned Beans" },
+	{ "PROVISION_CANNED_CORN", 0, L"Canned Corn" },
+	{ "PROVISION_CANNED_SALMON", 0, L"Canned Salmon" },
+	{ "PROVISION_CANNED_KIDNEY_BEANS", 0, L"Canned Kidney Beans" },
+	{ "PROVISION_CANNED_PEAS", 0, L"Canned Peas" },
+	{ "PROVISION_SALTED_BEEF", 0, L"Salted Beef" },
+	{ "PROVISION_CANNED_SALTED_BEEF", 0, L"Canned Salted Beef" },
+	{ "PROVISION_CRACKERS", 0, L"Crackers" },
+	{ "PROVISION_BREAD", 0, L"Bread" },
+	{ "PROVISION_CHOCOLATE", 0, L"Chocolate" },
+	{ "PROVISION_CANDY", 0, L"Candy" },
+	{ "PROVISION_OATCAKES", 0, L"Oatcakes" },
+	{ "PROVISION_APPLES", 0, L"Apple" },
+
+	// Tonics
+	{ "CONSUMABLE_HEALTH_CURE", 0, L"Health Cure" },
+	{ "CONSUMABLE_HEALTH_CURE_POTENT", 0, L"Potent Health Cure" },
+	{ "CONSUMABLE_HEALTH_CURE_SPECIAL", 0, L"Special Health Cure" },
+	{ "CONSUMABLE_SNAKE_OIL", 0, L"Snake Oil" },
+	{ "CONSUMABLE_SNAKE_OIL_POTENT", 0, L"Potent Snake Oil" },
+	{ "CONSUMABLE_SNAKE_OIL_SPECIAL", 0, L"Special Snake Oil" },
+	{ "CONSUMABLE_MIRACLE_TONIC", 0, L"Miracle Tonic" },
+	{ "CONSUMABLE_MIRACLE_TONIC_POTENT", 0, L"Potent Miracle Tonic" },
+	{ "CONSUMABLE_MIRACLE_TONIC_SPECIAL", 0, L"Special Miracle Tonic" },
+	{ "CONSUMABLE_BITTERS", 0, L"Bitters" },
+	{ "CONSUMABLE_BITTERS_POTENT", 0, L"Potent Bitters" },
+	{ "CONSUMABLE_BITTERS_SPECIAL", 0, L"Special Bitters" },
+	{ "CONSUMABLE_COCAINE_CHEWING_GUM", 0, L"Cocaine Chewing Gum" },
+	{ "CONSUMABLE_MEDICINE", 0, L"Medicine" },
+	{ "CONSUMABLE_POTENT_MEDICINE", 0, L"Potent Medicine" },
+	{ "CONSUMABLE_SPECIAL_MEDICINE", 0, L"Special Medicine" }
+};
+
+static const int g_monitoredItemsCount = sizeof(g_monitoredItems) / sizeof(g_monitoredItems[0]);
+static int g_lootStartCounts[g_monitoredItemsCount] = { 0 };
+static int g_accumulatedDiffs[g_monitoredItemsCount] = { 0 };
+static bool g_lootHashesInitialized = false;
+
+static void HandleAutoLootAnnounce() {
+	if (!g_autoLootAnnounce) return;
+	DWORD now = GetTickCount();
+
+	Ped playerPed = PLAYER::PLAYER_PED_ID();
+	if (!ENTITY::DOES_ENTITY_EXIST(playerPed) || ENTITY::IS_ENTITY_DEAD(playerPed)) {
+		if (g_isLootingCorpse) {
+			g_isLootingCorpse = false;
+			g_lootedPed = 0;
+		}
+		return;
+	}
+	if (PED::IS_PED_ON_MOUNT(playerPed) || PED::IS_PED_IN_ANY_VEHICLE(playerPed, FALSE)) {
+		if (g_isLootingCorpse) {
+			g_isLootingCorpse = false;
+			g_lootedPed = 0;
+		}
+		return;
+	}
+
+	if (!g_lootHashesInitialized) {
+		DebugLog::log("Initializing monitored loot item hashes:");
+		for (int i = 0; i < g_monitoredItemsCount; ++i) {
+			if (g_monitoredItems[i].hash == 0) {
+				g_monitoredItems[i].hash = GAMEPLAY::GET_HASH_KEY(const_cast<char*>(g_monitoredItems[i].codeName));
+			}
+			DebugLog::log("  Item %d: %s = 0x%08X", i, g_monitoredItems[i].codeName, g_monitoredItems[i].hash);
+		}
+		g_lootHashesInitialized = true;
+	}
+
+	int invId = invoke<int>(0x13D234A2A3F66E63, playerPed); // _INVENTORY_GET_INVENTORY_ID_FROM_PED
+
+	if (!g_isLootingCorpse) {
+		static DWORD lastSearchTime = 0;
+		if (now - lastSearchTime < 250) return;
+		lastSearchTime = now;
+
+		// Find a dead ped within 2.5 meters that is NOT fully looted
+		Vector3 myPos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
+		int peds[1024];
+		int count = worldGetAllPeds(peds, 1024);
+		Ped nearestDeadPed = 0;
+		float nearestDist = 2.5f;
+
+		for (int i = 0; i < count; ++i) {
+			Ped p = (Ped)peds[i];
+			if (!p || p == playerPed) continue;
+			if (!ENTITY::DOES_ENTITY_EXIST(p) || !ENTITY::IS_ENTITY_DEAD(p)) continue;
+
+			// Check if already fully looted
+			BOOL isLooted = invoke<BOOL>(0x8DE41E9902E85756, p); // _IS_ENTITY_FULLY_LOOTED
+			if (isLooted) continue;
+
+			Vector3 tPos = ENTITY::GET_ENTITY_COORDS(p, TRUE, FALSE);
+			float d = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(myPos.x, myPos.y, myPos.z, tPos.x, tPos.y, tPos.z, TRUE);
+			if (d < nearestDist) {
+				nearestDist = d;
+				nearestDeadPed = p;
+			}
+		}
+
+		if (nearestDeadPed) {
+			// Check if player is holding the Loot control (0x41AC83D1 = INPUT_LOOT)
+			bool pressedLoot = CONTROLS::IS_CONTROL_JUST_PRESSED(0, 0x41AC83D1)
+				|| CONTROLS::IS_DISABLED_CONTROL_JUST_PRESSED(0, 0x41AC83D1)
+				|| CONTROLS::IS_CONTROL_PRESSED(0, 0x41AC83D1)
+				|| CONTROLS::IS_DISABLED_CONTROL_PRESSED(0, 0x41AC83D1);
+
+			if (pressedLoot) {
+				g_isLootingCorpse = true;
+				g_lootedPed = nearestDeadPed;
+				g_lootCheckMs = now;
+				A11y::speak(L"Looting body...", false);
+				DebugLog::log("Looting initiated near dead ped %d", nearestDeadPed);
+				DebugLog::log("  Loot Start: Inventory ID = %d", invId);
+
+				// Take baseline snapshot
+				for (int i = 0; i < g_monitoredItemsCount; ++i) {
+					g_lootStartCounts[i] = invoke<int>(0xE787F05DFC977BDE, invId, g_monitoredItems[i].hash, FALSE);
+					g_accumulatedDiffs[i] = 0;
+					if (g_lootStartCounts[i] > 0) {
+						DebugLog::log("    Pre-loot Count: %s = %d", g_monitoredItems[i].codeName, g_lootStartCounts[i]);
+					}
+				}
+			}
+		}
+	} else {
+		// Continuous tracking during the animation
+		for (int i = 0; i < g_monitoredItemsCount; ++i) {
+			int currentCount = invoke<int>(0xE787F05DFC977BDE, invId, g_monitoredItems[i].hash, FALSE);
+			int diff = currentCount - g_lootStartCounts[i];
+			if (diff > 0) {
+				g_accumulatedDiffs[i] += diff;
+				g_lootStartCounts[i] = currentCount; // Update baseline
+				DebugLog::log("Continuous Loot: Detected %s (+%d), accumulated total: %d", g_monitoredItems[i].codeName, diff, g_accumulatedDiffs[i]);
+			}
+		}
+
+		// Stop checking after exactly 7.5 seconds (7500 ms)
+		if (now - g_lootCheckMs >= 7500) {
+			g_isLootingCorpse = false;
+			Ped completedPed = g_lootedPed;
+			g_lootedPed = 0;
+
+			DebugLog::log("Looting complete. Ped %d, elapsed=%lu ms", completedPed, (unsigned long)(now - g_lootCheckMs));
+
+			// Build announcement
+			wchar_t speakBuf[1024] = L"";
+			int itemsFoundCount = 0;
+
+			for (int i = 0; i < g_monitoredItemsCount; ++i) {
+				if (g_accumulatedDiffs[i] > 0) {
+					wchar_t itemText[128];
+					swprintf_s(itemText, L", plus %d %s", g_accumulatedDiffs[i], g_monitoredItems[i].displayName);
+					if (wcslen(speakBuf) + wcslen(itemText) < 1000) {
+						wcscat_s(speakBuf, itemText);
+					}
+					itemsFoundCount++;
+					DebugLog::log("Final Loot Announcement: %s (+%d)", g_monitoredItems[i].codeName, g_accumulatedDiffs[i]);
+				}
+			}
+
+			if (itemsFoundCount > 0) {
+				wchar_t* cleanText = speakBuf;
+				if (wcsncmp(speakBuf, L", ", 2) == 0) {
+					cleanText = speakBuf + 2;
+				}
+				A11y::speak(cleanText, false);
+			} else {
+				A11y::speak(L"Looted body.", false);
+			}
+		}
+	}
+}
+
+// =======================================
+// AUTO-AIM SYSTEM (accessibility for blind players)
+// =======================================
+
+// Find nearest hostile ped within range and aim at them
+static void HandleAutoAim() {
+	if (!g_autoAimEnabled) return;
+
+	Player player = PLAYER::PLAYER_ID();
+	Ped playerPed = PLAYER::PLAYER_PED_ID();
+	if (!ENTITY::DOES_ENTITY_EXIST(playerPed) || ENTITY::IS_ENTITY_DEAD(playerPed)) {
+		g_autoAimTarget = 0;
+		return;
+	}
+
+	// Only activate when player is aiming (holding aim button)
+	bool isAiming = PLAYER::IS_PLAYER_FREE_AIMING(player) ? true : false;
+	if (!isAiming) {
+		g_autoAimTarget = 0;
+		return;
+	}
+
+	DWORD now = GetTickCount();
+	// Scan for target every 100ms (or if we don't have a valid target)
+	if (g_autoAimTarget == 0 || !ENTITY::DOES_ENTITY_EXIST(g_autoAimTarget) || ENTITY::IS_ENTITY_DEAD(g_autoAimTarget) || (now - g_lastAutoAimMs) >= 100) {
+		g_lastAutoAimMs = now;
+		
+		Vector3 myPos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
+
+		// Scan nearby peds for hostile targets using worldGetAllPeds
+		int peds[1024];
+		int count = worldGetAllPeds(peds, 1024);
+
+		Ped bestTarget = 0;
+		float bestDist = 150.0f; // max auto-aim range
+
+		for (int i = 0; i < count; ++i) {
+			Ped p = (Ped)peds[i];
+			if (!p || p == playerPed) continue;
+			if (!ENTITY::DOES_ENTITY_EXIST(p) || ENTITY::IS_ENTITY_DEAD(p)) continue;
+			if (IsOurGuard(p)) continue;
+
+			// Only target hostiles (relationship >= 4 = dislike/hate, or in combat with player/squad)
+			int rel = PED::GET_RELATIONSHIP_BETWEEN_PEDS(p, playerPed);
+			bool isHostile = (rel >= 4) || PED::IS_PED_IN_COMBAT(p, playerPed);
+			if (!isHostile) continue;
+
+			// Check line of sight
+			if (!ENTITY::HAS_ENTITY_CLEAR_LOS_TO_ENTITY(playerPed, p, 17)) continue;
+
+			Vector3 tPos = ENTITY::GET_ENTITY_COORDS(p, TRUE, FALSE);
+			float d = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(myPos.x, myPos.y, myPos.z, tPos.x, tPos.y, tPos.z, TRUE);
+			if (d < bestDist) {
+				bestDist = d;
+				bestTarget = p;
+			}
+		}
+
+		if (bestTarget && ENTITY::DOES_ENTITY_EXIST(bestTarget)) {
+			if (bestTarget != g_autoAimTarget) {
+				DebugLog::log("Auto-aim locked onto ped: %d. Distance: %.2f", bestTarget, bestDist);
+				g_autoAimTarget = bestTarget;
+			}
+		} else {
+			g_autoAimTarget = 0;
+		}
+	}
+
+	// Apply aim rotation math every frame for the locked target
+	if (g_autoAimTarget && ENTITY::DOES_ENTITY_EXIST(g_autoAimTarget) && !ENTITY::IS_ENTITY_DEAD(g_autoAimTarget)) {
+		Vector3 myPos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
+		Vector3 tPos;
+		if (PED::IS_PED_HUMAN(g_autoAimTarget)) {
+			tPos = PED::GET_PED_BONE_COORDS(g_autoAimTarget, 31086, 0.0f, 0.0f, 0.0f); // SKEL_Head
+		} else {
+			tPos = ENTITY::GET_ENTITY_COORDS(g_autoAimTarget, TRUE, FALSE);
+			tPos.z += 0.25f; // offset slightly for animals
+		}
+
+		float dx = tPos.x - myPos.x;
+		float dy = tPos.y - myPos.y;
+		float dz = tPos.z - myPos.z;
+
+		float groundDist = sqrtf(dx * dx + dy * dy);
+
+		// Calculate heading and pitch angles
+		float targetHeading = atan2f(-dx, dy) * (180.0f / 3.14159265f);
+		if (targetHeading < 0.0f) targetHeading += 360.0f;
+
+		float targetPitch = atan2f(dz, groundDist) * (180.0f / 3.14159265f);
+
+		// Face target
+		ENTITY::SET_ENTITY_HEADING(playerPed, targetHeading);
+
+		// Snap gameplay camera relative to player facing direction
+		CAM::SET_GAMEPLAY_CAM_RELATIVE_HEADING(0.0f, 1.0f);
+		CAM::SET_GAMEPLAY_CAM_RELATIVE_PITCH(targetPitch, 1.0f);
+
+		// Task aim gun at target
+		AI::TASK_AIM_GUN_AT_ENTITY(playerPed, g_autoAimTarget, -1, FALSE, 0);
+	}
+}
+
+// =======================================
+// AIMING TARGET ANNOUNCEMENTS
+// =======================================
+
+static const wchar_t* GetPedAnimalName(Ped ped) {
+	Hash model = ENTITY::GET_ENTITY_MODEL(ped);
+	for (int i = 0; i < ARRAY_LENGTH(pedModelInfos); i++) {
+		if (GAMEPLAY::GET_HASH_KEY(const_cast<char*>(pedModelInfos[i].model.c_str())) == model) {
+			static wchar_t nameBuf[128];
+			const std::string& n = pedModelInfos[i].name;
+			MultiByteToWideChar(CP_UTF8, 0, n.c_str(), -1, nameBuf, 128);
+			return nameBuf;
+		}
+	}
+	return nullptr;
+}
+
+static void HandleAimingAnnounce() {
+	DWORD now = GetTickCount();
+	if ((now - g_lastAimCheckMs) < 200) return;
+	g_lastAimCheckMs = now;
+
+	Player player = PLAYER::PLAYER_ID();
+	Ped playerPed = PLAYER::PLAYER_PED_ID();
+	if (!ENTITY::DOES_ENTITY_EXIST(playerPed)) return;
+
+	bool isAiming = PLAYER::IS_PLAYER_FREE_AIMING(player) ? true : false;
+
+	if (!isAiming) {
+		if (g_wasAiming) {
+			g_wasAiming = false;
+			g_lastAimedEntity = 0;
+		}
+		return;
+	}
+
+	Entity aimedEntity = 0;
+	bool gotEntity = PLAYER::GET_ENTITY_PLAYER_IS_FREE_AIMING_AT(player, &aimedEntity) ? true : false;
+
+	if (!gotEntity || !aimedEntity || !ENTITY::DOES_ENTITY_EXIST(aimedEntity)) {
+		// Aiming at nothing (wall, ground, sky)
+		if (!g_wasAiming || g_lastAimedEntity != 0) {
+			A11y::speak(L"Aiming at nothing", false);
+			g_lastAimedEntity = 0;
+			g_wasAiming = true;
+		}
+		return;
+	}
+
+	// Only announce when target changes
+	if (g_wasAiming && aimedEntity == g_lastAimedEntity) return;
+
+	g_wasAiming = true;
+	g_lastAimedEntity = aimedEntity;
+
+	if (ENTITY::IS_ENTITY_A_PED(aimedEntity)) {
+		Ped targetPed = (Ped)aimedEntity;
+		if (ENTITY::IS_ENTITY_DEAD(targetPed)) {
+			A11y::speak(L"Aiming at dead body", false);
+			return;
+		}
+		if (PED::IS_PED_HUMAN(targetPed)) {
+			// Check relationship: 5 = HATE, 4 = DISLIKE, hostile means enemy
+			int rel = PED::GET_RELATIONSHIP_BETWEEN_PEDS(targetPed, playerPed);
+			bool isInCombat = PED::IS_PED_IN_COMBAT(targetPed, playerPed) ? true : false;
+			if (rel >= 4 || isInCombat) {
+				float dist = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(
+					ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE).x,
+					ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE).y,
+					ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE).z,
+					ENTITY::GET_ENTITY_COORDS(targetPed, TRUE, FALSE).x,
+					ENTITY::GET_ENTITY_COORDS(targetPed, TRUE, FALSE).y,
+					ENTITY::GET_ENTITY_COORDS(targetPed, TRUE, FALSE).z, TRUE);
+				wchar_t buf[200];
+				swprintf_s(buf, L"Aiming at enemy, %.0f meters", dist);
+				A11y::speak(buf, true);
+			} else {
+				A11y::speak(L"Aiming at civilian", false);
+			}
+		} else {
+			// Animal
+			const wchar_t* animalName = GetPedAnimalName(targetPed);
+			if (animalName) {
+				wchar_t buf[200];
+				swprintf_s(buf, L"Aiming at %s", animalName);
+				A11y::speak(buf, false);
+			} else {
+				A11y::speak(L"Aiming at animal", false);
+			}
+		}
+	} else if (ENTITY::IS_ENTITY_A_VEHICLE(aimedEntity)) {
+		A11y::speak(L"Aiming at vehicle", false);
+	} else if (ENTITY::IS_ENTITY_AN_OBJECT(aimedEntity)) {
+		A11y::speak(L"Aiming at object", false);
+	} else {
+		A11y::speak(L"Aiming at something", false);
+	}
 }
 
 MenuBase *CreateMainMenu(MenuController *controller)
@@ -2582,6 +4934,7 @@ MenuBase *CreateMainMenu(MenuController *controller)
 	auto menu = new MenuBase(new MenuItemTitle("NATIVE  TRAINER  (AB)"));
 	controller->RegisterMenu(menu);
 
+	menu->AddItem(new MenuItemMenu("SQUAD MANAGER", CreateBodyguardMenu(controller)));
 	menu->AddItem(new MenuItemMenu("PLAYER", CreatePlayerMenu(controller)));
 	menu->AddItem(new MenuItemMenu("ANIMALS", CreateAnimalSpawnerMenu(controller)));
 	menu->AddItem(new MenuItemMenu("PEDS", CreateHumanSpawnerMenu(controller)));
@@ -2596,2331 +4949,319 @@ MenuBase *CreateMainMenu(MenuController *controller)
 	return menu;
 }
 
-// ===== PLAGUE SYSTEMS =====
-
-// Disease Only Mode: Make people cough, sneeze, vomit, and fall down (no death)
-static void DiseaseOnlySystem(DWORD& lastScanMs)
-{
-	DWORD now = GetTickCount();
-	if ((now - lastScanMs) < 2000) return; // scan every 2 seconds
-	lastScanMs = now;
-	
-	Ped playerPed = PLAYER::PLAYER_PED_ID();
-	if (!playerPed || !ENTITY::DOES_ENTITY_EXIST(playerPed)) return;
-	
-	// Find nearby peds within 50m
-	int packed[33] = { 32 };
-	int count = PED::GET_PED_NEARBY_PEDS(playerPed, packed, -1, 0);
-	if (count <= 0) return;
-	
-	Vector3 playerPos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
-	int lim = packed[0]; if (lim > 32) lim = 32;
-	
-	for (int i = 1; i <= lim; ++i) {
-		Ped target = (Ped)packed[i];
-		if (!target || target == playerPed) continue;
-		if (!ENTITY::DOES_ENTITY_EXIST(target) || ENTITY::IS_ENTITY_DEAD(target)) continue;
-		if (PED::IS_PED_A_PLAYER(target)) continue;
-		
-		Vector3 targetPos = ENTITY::GET_ENTITY_COORDS(target, TRUE, FALSE);
-		float distance = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(playerPos.x, playerPos.y, playerPos.z,
-		                                                       targetPos.x, targetPos.y, targetPos.z, TRUE);
-		if (distance > 50.0f) continue;
-		
-		// Make them sick with animations
-		STREAMING::REQUEST_ANIM_DICT((char*)"amb_misc@world_human_coughing");
-		if (STREAMING::HAS_ANIM_DICT_LOADED((char*)"amb_misc@world_human_coughing")) {
-			AI::TASK_PLAY_ANIM(target, (char*)"amb_misc@world_human_coughing", (char*)"coughing", 4.0f, -8.0f, 4000, 1, 0.0f, FALSE, FALSE, FALSE, 0, FALSE);
-		}
-		
-		// Random chance for vomiting or falling
-		int action = rand() % 3;
-		if (action == 0) {
-			// Coughing (already done above)
-		} else if (action == 1) {
-			// Vomiting animation
-			STREAMING::REQUEST_ANIM_DICT((char*)"creatures@rottweiler@amb@world_dog_sitting@base");
-			if (STREAMING::HAS_ANIM_DICT_LOADED((char*)"creatures@rottweiler@amb@world_dog_sitting@base")) {
-				AI::TASK_PLAY_ANIM(target, (char*)"creatures@rottweiler@amb@world_dog_sitting@base", (char*)"base", 4.0f, -8.0f, 3000, 1, 0.0f, FALSE, FALSE, FALSE, 0, FALSE);
-			}
-		} else if (action == 2) {
-			// Fall down weakly
-			PED::SET_PED_TO_RAGDOLL(target, 2000, 4000, 0, TRUE, TRUE, FALSE);
-		}
-	}
-}
-
-// Instant Kill Mode: Kill immediately when detected
-static void InstantKillSystem(DWORD& lastScanMs)
-{
-	DWORD now = GetTickCount();
-	if ((now - lastScanMs) < 500) return; // scan every 0.5 seconds for quick response
-	lastScanMs = now;
-	
-	Ped playerPed = PLAYER::PLAYER_PED_ID();
-	if (!playerPed || !ENTITY::DOES_ENTITY_EXIST(playerPed)) return;
-	
-	// Find nearby peds within 50m
-	int packed[33] = { 32 };
-	int count = PED::GET_PED_NEARBY_PEDS(playerPed, packed, -1, 0);
-	if (count <= 0) return;
-	
-	Vector3 playerPos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
-	int lim = packed[0]; if (lim > 32) lim = 32;
-	
-	for (int i = 1; i <= lim; ++i) {
-		Ped target = (Ped)packed[i];
-		if (!target || target == playerPed) continue;
-		if (!ENTITY::DOES_ENTITY_EXIST(target) || ENTITY::IS_ENTITY_DEAD(target)) continue;
-		if (PED::IS_PED_A_PLAYER(target)) continue;
-		
-		Vector3 targetPos = ENTITY::GET_ENTITY_COORDS(target, TRUE, FALSE);
-		float distance = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(playerPos.x, playerPos.y, playerPos.z,
-		                                                       targetPos.x, targetPos.y, targetPos.z, TRUE);
-		if (distance > 50.0f) continue;
-		
-		// Instant death - no delay
-		ENTITY::SET_ENTITY_HEALTH(target, 0, 0);
-	}
-}
-
-// Black Death Mode: Cough, sneeze, get sick for 6-10 seconds, then die
-static void BlackDeathSystem(DWORD& lastScanMs)
-{
-	static std::unordered_map<Ped, DWORD> infectedPeds; // Track infection times
-	
-	DWORD now = GetTickCount();
-	if ((now - lastScanMs) < 1500) return; // scan every 1.5 seconds
-	lastScanMs = now;
-	
-	Ped playerPed = PLAYER::PLAYER_PED_ID();
-	if (!playerPed || !ENTITY::DOES_ENTITY_EXIST(playerPed)) return;
-	
-	// Find nearby peds within 50m
-	int packed[33] = { 32 };
-	int count = PED::GET_PED_NEARBY_PEDS(playerPed, packed, -1, 0);
-	if (count > 0) {
-		Vector3 playerPos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
-		int lim = packed[0]; if (lim > 32) lim = 32;
-		
-		for (int i = 1; i <= lim; ++i) {
-			Ped target = (Ped)packed[i];
-			if (!target || target == playerPed) continue;
-			if (!ENTITY::DOES_ENTITY_EXIST(target) || ENTITY::IS_ENTITY_DEAD(target)) continue;
-			if (PED::IS_PED_A_PLAYER(target)) continue;
-			
-			Vector3 targetPos = ENTITY::GET_ENTITY_COORDS(target, TRUE, FALSE);
-			float distance = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(playerPos.x, playerPos.y, playerPos.z,
-			                                                       targetPos.x, targetPos.y, targetPos.z, TRUE);
-			if (distance > 50.0f) continue;
-			
-			// If not already infected, infect them
-			if (infectedPeds.find(target) == infectedPeds.end()) {
-				infectedPeds[target] = now;
-				
-				// Start coughing animation
-				STREAMING::REQUEST_ANIM_DICT((char*)"amb_misc@world_human_coughing");
-				if (STREAMING::HAS_ANIM_DICT_LOADED((char*)"amb_misc@world_human_coughing")) {
-					AI::TASK_PLAY_ANIM(target, (char*)"amb_misc@world_human_coughing", (char*)"coughing", 4.0f, -8.0f, -1, 1, 0.0f, FALSE, FALSE, FALSE, 0, FALSE);
-				}
-			}
-		}
-	}
-	
-	// Check infected peds for death timing (6-10 seconds after infection)
-	auto it = infectedPeds.begin();
-	while (it != infectedPeds.end()) {
-		Ped infected = it->first;
-		DWORD infectionTime = it->second;
-		
-		if (!ENTITY::DOES_ENTITY_EXIST(infected) || ENTITY::IS_ENTITY_DEAD(infected)) {
-			it = infectedPeds.erase(it);
-			continue;
-		}
-		
-		DWORD sickDuration = now - infectionTime;
-		DWORD deathTime = 6000 + (rand() % 4000); // 6-10 seconds
-		
-		if (sickDuration > deathTime) {
-			// Time to die
-			ENTITY::SET_ENTITY_HEALTH(infected, 0, 0);
-			it = infectedPeds.erase(it);
-		} else {
-			++it;
-		}
-	}
-}
-
-// Plague System Manager: Central handler for all plague types
-static void PlagueSystemManager(DWORD& lastScanMs)
-{
-	if (!g_plagueSystemEnabled || g_a11yMode != A11yMode::BlackDeath) return;
-	
-	switch (g_plagueType) {
-	case PlagueType::FullPlague:
-		BlackDeathSystem(lastScanMs);
-		break;
-	case PlagueType::DiseaseOnly:
-		DiseaseOnlySystem(lastScanMs);
-		break;
-	case PlagueType::InstantKill:
-		InstantKillSystem(lastScanMs);
-		break;
-	default:
-		break;
-	}
-}
-
-// Toggle Plague System: Switches between plague types and manages enable/disable
-static void TogglePlagueSystem(PlagueType newType)
-{
-	if (g_a11yMode != A11yMode::BlackDeath) {
-		A11y::speak(L"Plague system only available in Black Death mode", true);
-		return;
-	}
-	
-	bool wasEnabled = g_plagueSystemEnabled;
-	bool wasCurrentType = (g_plagueType == newType);
-	
-	if (wasCurrentType) {
-		// Toggle current type on/off
-		g_plagueSystemEnabled = !g_plagueSystemEnabled;
-	} else {
-		// Switch to new type and enable
-		g_plagueType = newType;
-		g_plagueSystemEnabled = true;
-	}
-	
-	const wchar_t* typeName = PlagueTypeName(g_plagueType);
-	wchar_t buf[80];
-	swprintf_s(buf, L"%s %s", typeName, g_plagueSystemEnabled ? L"enabled" : L"disabled");
-	A11y::speak(buf, true);
-}
-
-// Helper function to assign kill task to a bodyguard
-static void AssignKillTask(Ped bodyguard, Ped target)
-{
-	if (!bodyguard || !target || !ENTITY::DOES_ENTITY_EXIST(bodyguard) || !ENTITY::DOES_ENTITY_EXIST(target)) return;
-	
-	// Clear current tasks and move to target
-	AI::CLEAR_PED_TASKS_IMMEDIATELY(bodyguard, TRUE, TRUE);
-	AI::TASK_GO_TO_ENTITY(bodyguard, target, -1, 1.5f, 2.0f, 1073741824, 0);
-	
-	// Set bodyguard to be aggressive
-	PED::SET_PED_COMBAT_ABILITY(bodyguard, 2); // professional
-	PED::SET_PED_COMBAT_RANGE(bodyguard, 2); // far
-	
-	// Force combat with target
-	AI::TASK_COMBAT_PED(bodyguard, target, 0, 16);
-}
-
-// Enhanced Bodyguard Protection System: Kill anyone in 30m radius with smart target distribution
-static void BodyguardProtectionSystem(bool protectionEnabled, DWORD& lastScanMs, Ped primaryBodyguard)
-{
-	if (!protectionEnabled || !primaryBodyguard || !ENTITY::DOES_ENTITY_EXIST(primaryBodyguard) || ENTITY::IS_ENTITY_DEAD(primaryBodyguard)) {
-		return;
-	}
-	
-	DWORD now = GetTickCount();
-	if ((now - lastScanMs) < 1500) return; // scan every 1.5 seconds
-	lastScanMs = now;
-	
-	Ped playerPed = PLAYER::PLAYER_PED_ID();
-	if (!playerPed || !ENTITY::DOES_ENTITY_EXIST(playerPed) || ENTITY::IS_ENTITY_DEAD(playerPed)) return;
-	
-	Vector3 playerPos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
-	
-	// Get all available bodyguards
-	std::vector<Ped> availableBodyguards;
-	availableBodyguards.push_back(primaryBodyguard);
-	
-	// Find additional bodyguards nearby (allies of the primary bodyguard)
-	int packedAllies[33] = { 32 };
-	int allyCount = PED::GET_PED_NEARBY_PEDS(primaryBodyguard, packedAllies, -1, 0);
-	if (allyCount > 0) {
-		int allyLim = packedAllies[0]; if (allyLim > 32) allyLim = 32;
-		for (int i = 1; i <= allyLim && availableBodyguards.size() < 5; ++i) { // max 5 bodyguards
-			Ped ally = (Ped)packedAllies[i];
-			if (ally && ally != playerPed && ENTITY::DOES_ENTITY_EXIST(ally) && !ENTITY::IS_ENTITY_DEAD(ally)) {
-				float allyDist = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(playerPos.x, playerPos.y, playerPos.z,
-					ENTITY::GET_ENTITY_COORDS(ally, TRUE, FALSE).x,
-					ENTITY::GET_ENTITY_COORDS(ally, TRUE, FALSE).y,
-					ENTITY::GET_ENTITY_COORDS(ally, TRUE, FALSE).z, TRUE);
-				if (allyDist < 50.0f && !PED::IS_PED_IN_COMBAT(ally, playerPed)) {
-					availableBodyguards.push_back(ally);
-				}
-			}
-		}
-	}
-	
-	// Collect all targets within 30m radius
-	std::vector<std::pair<Ped, float>> targets; // target and distance
-	int packed[33] = { 32 };
-	int count = PED::GET_PED_NEARBY_PEDS(playerPed, packed, -1, 0);
-	if (count > 0) {
-		int lim = packed[0]; if (lim > 32) lim = 32;
-		for (int i = 1; i <= lim; ++i) {
-			Ped target = (Ped)packed[i];
-			if (!target || target == playerPed) continue;
-			if (!ENTITY::DOES_ENTITY_EXIST(target) || ENTITY::IS_ENTITY_DEAD(target)) continue;
-			if (PED::IS_PED_A_PLAYER(target)) continue; // never target players
-			
-			// Skip if target is one of our bodyguards
-			bool isBodyguard = false;
-			for (Ped bg : availableBodyguards) {
-				if (target == bg) { isBodyguard = true; break; }
-			}
-			if (isBodyguard) continue;
-			
-			// Check distance (30 meter kill radius)
-			Vector3 targetPos = ENTITY::GET_ENTITY_COORDS(target, TRUE, FALSE);
-			float distance = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(playerPos.x, playerPos.y, playerPos.z, 
-			                                                       targetPos.x, targetPos.y, targetPos.z, TRUE);
-			if (distance <= 30.0f) {
-				targets.push_back(std::make_pair(target, distance));
-			}
-		}
-	}
-	
-	if (targets.empty()) return;
-	
-	// Sort targets by distance (closest first)
-	std::sort(targets.begin(), targets.end(), [](const std::pair<Ped, float>& a, const std::pair<Ped, float>& b) {
-		return a.second < b.second;
-	});
-	
-	// Assign targets to bodyguards intelligently
-	int numBodyguards = availableBodyguards.size();
-	int numTargets = targets.size();
-	
-	if (numBodyguards == 1) {
-		// One bodyguard: target closest, then next closest after finishing
-		Ped bodyguard = availableBodyguards[0];
-		if (!PED::IS_PED_IN_COMBAT(bodyguard, 0)) { // if not already busy
-			Ped target = targets[0].first;
-			AssignKillTask(bodyguard, target);
-		}
-	}
-	else if (numBodyguards >= 2) {
-		// Multiple bodyguards: assign closest targets first
-		int assignedTargets = 0;
-		for (int i = 0; i < numBodyguards && assignedTargets < numTargets; ++i) {
-			Ped bodyguard = availableBodyguards[i];
-			if (!PED::IS_PED_IN_COMBAT(bodyguard, 0)) { // if not already busy
-				Ped target = targets[assignedTargets].first;
-				AssignKillTask(bodyguard, target);
-				assignedTargets++;
-			}
-		}
-	}
-}
-
 void main()
 {
+	// Initialize accessibility layer
+	A11y::init();
+	A11y::speak(L"Native Trainer loaded. Ready.", true);
+	
+	// Initialize controller support
+	XController::Init();
+	
 	auto menuController = new MenuController();
 	auto mainMenu = CreateMainMenu(menuController);
-	// Pre-create Guard Manager menu (opened only in Bodyguard mode via Numpad '.')
-	MenuBase* guardManagerMenu = CreateGuardManagerMenu(menuController);
-	// One-time ready announcement
-	static bool greeted = false;
-	if (!greeted) {
-		A11y::speak(L"Accessibility mod loaded. Ready.", true);
-		greeted = true;
-	}
-
-	static bool announcedReady = false;
-	static DWORD startupMs = GetTickCount();
-	// Bodyguard protection system
-	static bool g_protectionEnabled = false;    // auto-protection toggle
-	static DWORD g_lastProtectionScanMs = 0;    // last scan time
-	// Track last aimed entity to avoid repeating announcements
-	static Entity lastAimedEntity = 0;
-	static DWORD lastAimSpeakMs = 0;
-	static int lastAimedDistM = -1;
-	static int lastAimedHealthPct = -1;
-	static int camRayHandle = 0;
-	static Entity camRayLastIgnore = 0;
-	static Vector3 camRayEnd{};
-	static Vector3 camRayNorm{};
-	// Attribution for money changes (recent targeted ped)
-	static Entity lastTargetPedForMoney = 0;
-	static DWORD lastTargetPedForMoneyMs = 0;
-	static wchar_t lastTargetPedForMoneyName[128] = {0};
-	// Track current weapon to announce on change and on-demand
-	static Hash lastWeaponHash = 0;              // last announced weapon hash
-	static DWORD lastWeaponAnnounceMs = 0;       // last announcement time
-	static Hash weaponCandidateHash = 0;         // current candidate weapon
-	static DWORD weaponCandidateSinceMs = 0;     // since when the candidate is stable
-	// Bodyguard state
-	static Ped g_bodyguard = 0;                  // current bodyguard ped
-	static DWORD g_bodyguardLastTaskMs = 0;
-	// Wolf companion state
-	static Ped g_wolf = 0;
-	static DWORD g_wolfLastTaskMs = 0;
-	// Respawn scheduling
-	static DWORD g_guardRespawnAtMs = 0;
-	static DWORD g_wolfRespawnAtMs = 0;
-	// Pending human attack after wolf falls
-	static Entity g_pendingAttackTarget = 0; // when wolf dies, human will attack this
-	static DWORD g_humanThreatUntilMs = 0;   // small aim window to simulate threats
-	// Wolf pack assist state
-	static Ped g_wolfPack[8] = { 0 };
-	static int g_wolfPackSize = 0;
-	static DWORD g_nextHowlAtMs = 0;
-	static int g_howlsRemaining = 0;
-	static DWORD g_lastAttackSeenMs = 0;
-	static DWORD g_packCooldownUntilMs = 0;
-	// User-requested persistent pack target size (number of helpers to keep around)
-	static int g_targetPackSize = 0; // 0 means no persistent pack; manual howls will fill up to this
-	const int MAX_WOLF_PACK = 6;     // realistic cap of helpers (not counting the main wolf)
-
-	// Helper: safe wolf howl cue; try a real anim if available, else stand-still as a cue
-	static auto TryWolfHowl = [](Ped p) -> bool {
-		if (!p || !ENTITY::DOES_ENTITY_EXIST(p) || ENTITY::IS_ENTITY_DEAD(p)) return false;
-		// Try a few likely anim dict/name pairs non-blocking; if cached they'll play, else we gracefully fall back
-		struct Pair { const char* dict; const char* name; };
-		static const Pair cands[] = {
-			{"creatures_mammal@wolf@normal@idle", "howl"},
-			{"creatures_mammal@wolf@interaction@idle", "howl"},
-			{"ai_ambient@animal@wolf@behaviour@howl", "howl"}
-		};
-		for (auto &c : cands) {
-			STREAMING::REQUEST_ANIM_DICT((char*)c.dict);
-			if (STREAMING::HAS_ANIM_DICT_LOADED((char*)c.dict)) {
-				AI::TASK_PLAY_ANIM(p, (char*)c.dict, (char*)c.name, 8.0f, 1.0f, 1600, 0, 0.0f, FALSE, FALSE, FALSE, 0, FALSE);
-				return true;
-			}
-		}
-		// Fallback cue (guaranteed safe)
-		AI::TASK_STAND_STILL(p, 900);
-		return true;
-	};
-
-	// Helper: safe player call cue (no audio native to avoid crashes)
-	static auto TryPlayerCall = [](Ped playerPed) -> bool {
-		if (!playerPed || !ENTITY::DOES_ENTITY_EXIST(playerPed) || ENTITY::IS_ENTITY_DEAD(playerPed)) return false;
-		AI::TASK_STAND_STILL(playerPed, 400);
-		return true;
-	};
-
-	// Deferred howl after player's call for realism
-	static DWORD g_forcedHowlAtMs = 0; static bool g_forcedHowlAll = false;
-
-	// Helper: try safe frontend sounds for audible feedback (names may no-op but won’t crash)
-	static auto TryFrontendBeep = []() {
-		// Try a few common cues; if invalid, they silently do nothing
-		AUDIO::PLAY_SOUND_FRONTEND((char*)"SELECT", (char*)"HUD_SHOP_SOUNDSET", FALSE, FALSE);
-		AUDIO::PLAY_SOUND_FRONTEND((char*)"NAV_UP_DOWN", (char*)"HUD_SHOP_SOUNDSET", FALSE, FALSE);
-		AUDIO::PLAY_SOUND_FRONTEND((char*)"TOGGLE_ON", (char*)"HUD_SHOP_SOUNDSET", FALSE, FALSE);
-	};
+	
+	bool lastControllerMenuState = false;
+	
+	// Clean start for squad system
+	DismissAllGuards();
 	
 	while (true)
 	{		
-		if (!menuController->HasActiveMenu() && MenuInput::MenuSwitchPressed())
-		{
-			MenuInput::MenuInputBeep();
-			menuController->PushMenu(mainMenu);
-			// Deferred: no immediate speech on open to avoid early-load issues.
-		}
+		// Pause menu accessibility (always runs)
+		HandlePauseMenuAccessibility();
 
-		// NumPad 1 (Global): announce player's health
-		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Global && IsKeyJustUp(VK_NUMPAD1))
-		{
-			Ped playerPed = PLAYER::PLAYER_PED_ID();
-			int health = ENTITY::GET_ENTITY_HEALTH(playerPed);
-			int maxHealth = PED::GET_PED_MAX_HEALTH(playerPed);
-			if (maxHealth <= 0) maxHealth = 1; // avoid division by zero
-			if (health > maxHealth) health = maxHealth; // clamp
-			int percent = static_cast<int>((health * 100.0f) / static_cast<float>(maxHealth) + 0.5f);
-			if (percent < 0) percent = 0; if (percent > 100) percent = 100;
-			wchar_t buf[64];
-			swprintf_s(buf, L"health %d (%d%%)", health, percent);
-			A11y::speak(buf, true);
+		// Process asynchronous bodyguard spawns
+		ProcessPendingSpawns();
 
-			// Heuristic getters for core values (stamina/dead eye) via ATTRIBUTE namespace.
-			auto getCorePercent = [](Ped ped, int attrIdx) -> int {
-				// Try two candidate natives; interpret as either 0..1 or 0..100.
-				float v1 = ATTRIBUTE::_0x4C9F782180712742(ped, attrIdx);
-				float v2 = ATTRIBUTE::_0xB429F58803D285B1(ped, attrIdx);
-				float v = (v1 > 0.0f ? v1 : (v2 > 0.0f ? v2 : 0.0f));
-				if (v <= 0.0f) return -1; // unknown/unavailable (avoid reporting 0 unless confident)
-				if (v <= 1.0f) return static_cast<int>(v * 100.0f + 0.5f);
-				if (v <= 100.0f) return static_cast<int>(v + 0.5f);
-				return -1;
-			};
+		// Monitor auto-navigation target arrival
+		if (g_autoWalkActive && g_navToTargetActive) {
+			Ped pp = PLAYER::PLAYER_PED_ID();
+			if (ENTITY::DOES_ENTITY_EXIST(pp)) {
+				Vector3 pos = ENTITY::GET_ENTITY_COORDS(pp, TRUE, FALSE);
+				float dist = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(pos.x, pos.y, pos.z, g_navTargetX, g_navTargetY, g_navTargetZ, TRUE);
+				if (dist < 8.0f) {
+					AI::CLEAR_PED_TASKS(pp, TRUE, FALSE);
+					AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(pp, TRUE);
+					if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(pp, FALSE);
 
-			int staminaPct = getCorePercent(playerPed, 1); // 0: health, 1: stamina, 2: dead eye (convention)
-			int deadeyePct = getCorePercent(playerPed, 2);
-
-			// Then announce player context: state, speed, cores, wanted (no ammo to avoid instability)
-			bool onMount = PED::IS_PED_ON_MOUNT(playerPed) ? true : false;
-			bool inVeh = PED::IS_PED_IN_ANY_VEHICLE(playerPed, 0) ? true : false;
-			const char* state = onMount ? "mount" : (inVeh ? "vehicle" : "on foot");
-			Entity speedEnt = playerPed;
-			if (onMount) {
-				Entity m = PED::GET_MOUNT(playerPed);
-				if (ENTITY::DOES_ENTITY_EXIST(m)) speedEnt = m;
-			}
-			else if (inVeh) {
-				Entity v = PED::GET_VEHICLE_PED_IS_USING(playerPed);
-				if (ENTITY::DOES_ENTITY_EXIST(v)) speedEnt = v;
-			}
-			int spd = static_cast<int>(ENTITY::GET_ENTITY_SPEED(speedEnt) * 3.6f + 0.5f);
-			const char* move = "idle";
-			if (!inVeh) {
-				if (spd >= 14) move = "sprinting";
-				else if (spd >= 7) move = "running";
-				else if (spd >= 2) move = "walking";
-			}
-			// Ammo intentionally omitted
-			int wanted = PURSUIT::GET_PLAYER_WANTED_INTENSITY(PLAYER::PLAYER_ID());
-			bool isWanted = wanted > 0;
-
-			std::string ctx;
-			ctx.reserve(224);
-			// base movement/speed
-			{
-				char t[96];
-				snprintf(t, sizeof(t), "%s, %s, speed %d", state, move, spd);
-				ctx += t;
-			}
-			// cores
-			if (staminaPct >= 0) {
-				char t[32]; snprintf(t, sizeof(t), ", stamina %d%%", staminaPct);
-				ctx += t;
-			}
-			if (deadeyePct >= 0) {
-				char t[32]; snprintf(t, sizeof(t), ", dead eye %d%%", deadeyePct);
-				ctx += t;
-			}
-			// mounted horse stamina (if available)
-			if (onMount) {
-				Ped horse = PED::GET_MOUNT(playerPed);
-				if (ENTITY::DOES_ENTITY_EXIST(horse) && !ENTITY::IS_ENTITY_DEAD(horse)) {
-					int horseStam = getCorePercent(horse, 1);
-					if (horseStam >= 0) {
-						char t[40]; snprintf(t, sizeof(t), ", horse stamina %d%%", horseStam);
-						ctx += t;
+					bool mounted = PED::IS_PED_ON_MOUNT(pp);
+					if (mounted) {
+						Ped horse = PED::GET_MOUNT(pp);
+						if (horse) {
+							AI::CLEAR_PED_TASKS(horse, TRUE, FALSE);
+							AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(horse, TRUE);
+							if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(horse, FALSE);
+						}
 					}
-				}
-			}
-			// ammo omitted
-			// wanted
-			if (isWanted) ctx += ", wanted";
+					g_autoWalkActive = false;
+					g_navToTargetActive = false;
 
-			std::wstring wctx(ctx.begin(), ctx.end());
-			A11y::speak(wctx, false);
-		}
-
-		// NumPad 2 (Global): announce what you're riding/driving
-		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Global && IsKeyJustUp(VK_NUMPAD2))
-		{
-			Ped playerPed = PLAYER::PLAYER_PED_ID();
-			std::wstring wout;
-			if (PED::IS_PED_ON_MOUNT(playerPed))
-			{
-				Ped mount = PED::GET_MOUNT(playerPed);
-				if (!ENTITY::DOES_ENTITY_EXIST(mount)) { wout = L"mount"; if (!wout.empty()) A11y::speak(wout, true); goto after_num2; }
-				Hash model = ENTITY::GET_ENTITY_MODEL(mount);
-				std::string name;
-				for each (auto &info in pedModelInfos)
-				{
-					if (GAMEPLAY::GET_HASH_KEY(const_cast<char*>(info.model.c_str())) == model) { name = info.name; break; }
-				}
-				int h = ENTITY::GET_ENTITY_HEALTH(mount);
-				int mh = PED::GET_PED_MAX_HEALTH(mount); if (mh <= 0) mh = 1;
-				if (h > mh) h = mh; // clamp
-				int p = static_cast<int>((h * 100.0f) / static_cast<float>(mh) + 0.5f);
-				if (p < 0) p = 0; if (p > 100) p = 100;
-				wchar_t wname[64]; wname[0] = L'\0';
-				if (!name.empty()) { size_t n = name.size(); if (n > 63) n = 63; size_t converted = 0; mbstowcs_s(&converted, wname, 64, name.c_str(), n); wname[n] = L'\0'; }
-				wchar_t buf[128];
-				if (wname[0]) swprintf_s(buf, L"mount: %s, health %d (%d%%)", wname, h, p);
-				else swprintf_s(buf, L"mount, health %d (%d%%)", h, p);
-				wout = buf;
-			}
-			else if (PED::IS_PED_IN_ANY_VEHICLE(playerPed, 0))
-			{
-				Vehicle veh = PED::GET_VEHICLE_PED_IS_USING(playerPed);
-				if (!ENTITY::DOES_ENTITY_EXIST(veh)) { wout = L"vehicle"; if (!wout.empty()) A11y::speak(wout, true); goto after_num2; }
-				Hash model = ENTITY::GET_ENTITY_MODEL(veh);
-				bool isTrain = VEHICLE::IS_THIS_MODEL_A_TRAIN(model) ? true : false;
-				bool isBoat = VEHICLE::IS_THIS_MODEL_A_BOAT(model) ? true : false;
-				std::string kind = isTrain ? "train" : (isBoat ? "boat" : "vehicle");
-				std::string modelName;
-				for each (auto &vm in vehicleModels)
-				{
-					if (GAMEPLAY::GET_HASH_KEY(const_cast<char*>(vm.c_str())) == model) { modelName = vm; break; }
-				}
-				float spd = ENTITY::GET_ENTITY_SPEED(veh) * 3.6f; // km/h
-				int ispd = static_cast<int>(spd + 0.5f);
-				wchar_t wmodel[96]; wmodel[0] = L'\0';
-				if (!modelName.empty()) { size_t n = modelName.size(); if (n > 95) n = 95; size_t cv = 0; mbstowcs_s(&cv, wmodel, 96, modelName.c_str(), n); wmodel[n] = L'\0'; }
-				wchar_t buf[160];
-				if (wmodel[0]) swprintf_s(buf, L"%hs: %s, speed %d", kind.c_str(), wmodel, ispd);
-				else swprintf_s(buf, L"%hs, speed %d", kind.c_str(), ispd);
-				wout = buf;
-			}
-			else
-			{
-				wout = L"not mounted";
-			}
-			if (!wout.empty()) A11y::speak(wout, true);
-			after_num2:;
-		}
-		// NumPad 4: feed horse (Horse mode)
-		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Horse && IsKeyJustUp(VK_NUMPAD4))
-		{
-			Ped playerPed = PLAYER::PLAYER_PED_ID();
-			if (PED::IS_PED_ON_MOUNT(playerPed))
-			{
-				Ped horse = PED::GET_MOUNT(playerPed);
-				if (ENTITY::DOES_ENTITY_EXIST(horse) && !ENTITY::IS_ENTITY_DEAD(horse))
-				{
-					int h = ENTITY::GET_ENTITY_HEALTH(horse);
-					int mh = PED::GET_PED_MAX_HEALTH(horse); if (mh <= 0) mh = 1; if (h > mh) h = mh;
-					int add = mh / 4; if (add < 10) add = 10; // modest heal
-					int newH = h + add; if (newH > mh) newH = mh;
-					ENTITY::SET_ENTITY_HEALTH(horse, newH, FALSE);
-					PED::SET_PED_STAMINA(horse, 100.0);
-					int pct = static_cast<int>((newH * 100.0f) / static_cast<float>(mh) + 0.5f); if (pct > 100) pct = 100; if (pct < 0) pct = 0;
-					wchar_t buf[128]; swprintf_s(buf, L"fed horse, health %d (%d%%), stamina 100%%", newH, pct);
+					wchar_t buf[256];
+					swprintf_s(buf, L"Arrived at %s", g_navTargetName);
 					A11y::speak(buf, true);
-				}
-				else
-				{
-					A11y::speak(L"no valid horse", true);
-				}
-			}
-			else
-			{
-				A11y::speak(L"not on horse", true);
-			}
-		}
-
-	// NumPad 5: Cycle A11y mode (Global -> Horse -> Wolves -> Bodyguard -> BlackDeath)
-		if (!menuController->HasActiveMenu() && IsKeyJustUp(VK_NUMPAD5))
-		{
-			int m = (int)g_a11yMode;
-			m = (m + 1) % 5;  // Now we have 5 main modes
-			g_a11yMode = (A11yMode)m;
-			const wchar_t* name = ModeName(g_a11yMode);
-			wchar_t buf[64]; swprintf_s(buf, L"%s", name);
-			A11y::speak(buf, true);
-			
-			// Disable plague systems when changing mode
-			g_plagueSystemEnabled = false;
-		}
-
-	// Horse mode: NEW LAYOUT - 1: quick status, 2: health details, 3: bond/calm, 4: summon/dismiss, 6: speed boost, 7: detailed stats, 8: horse heading
-		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Horse)
-		{
-			// NumPad 1: Quick horse status
-			if (IsKeyJustUp(VK_NUMPAD1)) {
-				Ped me = PLAYER::PLAYER_PED_ID();
-				if (PED::IS_PED_ON_MOUNT(me)) {
-					Ped h = PED::GET_MOUNT(me);
-					if (ENTITY::DOES_ENTITY_EXIST(h) && !ENTITY::IS_ENTITY_DEAD(h)) {
-						int hp = ENTITY::GET_ENTITY_HEALTH(h);
-						int mh = PED::GET_PED_MAX_HEALTH(h); if (mh <= 0) mh = 1; if (hp > mh) hp = mh;
-						int pct = (int)((hp * 100.0f) / (float)mh + 0.5f);
-						wchar_t buf[96]; swprintf_s(buf, L"horse health %d%%, stamina ready", pct);
-						A11y::speak(buf, true);
-					} else A11y::speak(L"no valid horse", true);
-				} else A11y::speak(L"not on horse", true);
-			}
-			
-			// NumPad 2: Detailed health information
-			if (IsKeyJustUp(VK_NUMPAD2)) {
-<<<<<<< HEAD
-				Ped me = PLAYER::PLAYER_PED_ID();
-				if (PED::IS_PED_ON_MOUNT(me)) {
-					Ped h = PED::GET_MOUNT(me);
-					if (ENTITY::DOES_ENTITY_EXIST(h) && !ENTITY::IS_ENTITY_DEAD(h)) {
-						int hp = ENTITY::GET_ENTITY_HEALTH(h);
-						int mh = PED::GET_PED_MAX_HEALTH(h); if (mh <= 0) mh = 1; if (hp > mh) hp = mh;
-						int pct = (int)((hp * 100.0f) / (float)mh + 0.5f);
-						wchar_t buf[120]; swprintf_s(buf, L"horse health %d of %d (%d%%), stamina 100%%", hp, mh, pct);
-						A11y::speak(buf, true);
-					} else A11y::speak(L"no valid horse", true);
-				} else A11y::speak(L"not on horse", true);
-=======
-				Ped me = PLAYER::PLAYER_PED_ID(); Vector3 c = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
-				std::wstring wlab; if (TryGetZoneLabelAt(c, wlab)) A11y::speak(wlab, true); else A11y::speak(L"unknown", true);
->>>>>>> c5a4ce1d4f87f6c1ac8d406db559871b886cf940
-			}
-			
-			// NumPad 3: Bond level and calm horse
-			if (IsKeyJustUp(VK_NUMPAD3)) {
-				Ped playerPed = PLAYER::PLAYER_PED_ID();
-				if (PED::IS_PED_ON_MOUNT(playerPed)) {
-					Ped horse = PED::GET_MOUNT(playerPed);
-					if (ENTITY::DOES_ENTITY_EXIST(horse) && !ENTITY::IS_ENTITY_DEAD(horse)) { 
-						PED::CLEAR_PED_WETNESS(horse); 
-						A11y::speak(L"horse calmed and bonded", true); 
-					}
-					else { A11y::speak(L"no valid horse", true); }
-				} else { A11y::speak(L"not on horse", true); }
-			}
-			
-			// NumPad 4: Feed horse (heal and restore stamina)
-			if (IsKeyJustUp(VK_NUMPAD4)) {
-				Ped playerPed = PLAYER::PLAYER_PED_ID();
-				if (PED::IS_PED_ON_MOUNT(playerPed)) {
-					Ped horse = PED::GET_MOUNT(playerPed);
-					if (ENTITY::DOES_ENTITY_EXIST(horse) && !ENTITY::IS_ENTITY_DEAD(horse)) {
-						int h = ENTITY::GET_ENTITY_HEALTH(horse);
-						int mh = PED::GET_PED_MAX_HEALTH(horse); if (mh <= 0) mh = 1; if (h > mh) h = mh;
-						int add = mh / 4; if (add < 10) add = 10; int newH = h + add; if (newH > mh) newH = mh; ENTITY::SET_ENTITY_HEALTH(horse, newH, FALSE);
-						PED::SET_PED_STAMINA(horse, 100.0);
-						int pct = static_cast<int>((newH * 100.0f) / static_cast<float>(mh) + 0.5f); if (pct > 100) pct = 100; if (pct < 0) pct = 0;
-						wchar_t buf[128]; swprintf_s(buf, L"fed horse, health %d (%d%%), stamina 100%%", newH, pct);
-						A11y::speak(buf, true);
-					} else { A11y::speak(L"no valid horse", true); }
-				} else { A11y::speak(L"not on horse", true); }
-			}
-			
-			// NumPad 7: Detailed horse statistics
-			if (IsKeyJustUp(VK_NUMPAD7)) {
-				Ped me = PLAYER::PLAYER_PED_ID();
-				if (PED::IS_PED_ON_MOUNT(me)) {
-					Ped horse = PED::GET_MOUNT(me);
-					if (ENTITY::DOES_ENTITY_EXIST(horse) && !ENTITY::IS_ENTITY_DEAD(horse)) {
-						int hp = ENTITY::GET_ENTITY_HEALTH(horse);
-						int mh = PED::GET_PED_MAX_HEALTH(horse); if (mh <= 0) mh = 1; if (hp > mh) hp = mh;
-						int hp_pct = (int)((hp * 100.0f) / (float)mh + 0.5f);
-						float speed = ENTITY::GET_ENTITY_SPEED(horse) * 3.6f;
-						
-						wchar_t buf[120]; swprintf_s(buf, L"horse: health %d%%, speed %.0f kmh", hp_pct, speed);
-						A11y::speak(buf, true);
-					} else A11y::speak(L"no valid horse", true);
-				} else A11y::speak(L"not on horse", true);
-			}
-			
-			// NumPad 8: Horse heading direction
-			if (IsKeyJustUp(VK_NUMPAD8)) {
-				Ped me = PLAYER::PLAYER_PED_ID();
-				if (PED::IS_PED_ON_MOUNT(me)) {
-					Ped horse = PED::GET_MOUNT(me);
-					if (ENTITY::DOES_ENTITY_EXIST(horse) && !ENTITY::IS_ENTITY_DEAD(horse)) {
-						float heading = ENTITY::GET_ENTITY_HEADING(horse);
-						int b = HeadingBucket(heading);
-						const wchar_t* wname = BucketName8(b);
-						if (wname && *wname) { 
-							wchar_t buf[80]; swprintf_s(buf, L"horse facing %s", wname); 
-							A11y::speak(buf, true); 
-						} else A11y::speak(L"horse heading", true);
-					} else A11y::speak(L"no valid horse", true);
-				} else A11y::speak(L"not on horse", true);
-			}
-		}
-
-		// Removed on-demand camera scan (NumPad 0); automatic announcements occur while aiming only
-
-	// NumPad 3 (Global): on-demand current weapon info (name only)
-		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Global && IsKeyJustUp(VK_NUMPAD3))
-		{
-			Ped ped = PLAYER::PLAYER_PED_ID();
-			if (!ENTITY::DOES_ENTITY_EXIST(ped)) { A11y::speak(L"unarmed", true); goto after_num3; }
-			Hash cur = 0; Hash unarmed = GAMEPLAY::GET_HASH_KEY("WEAPON_UNARMED");
-			if (WEAPON::GET_CURRENT_PED_WEAPON(ped, &cur, 0, 0, 0) && cur && WEAPON::IS_WEAPON_VALID(cur) && cur != unarmed && WEAPON::HAS_PED_GOT_WEAPON(ped, cur, 0, 0))
-			{
-				// Lookup friendly name
-				std::string uname;
-				for each (auto info in weaponInfos)
-				{
-					Hash wh = GAMEPLAY::GET_HASH_KEY(const_cast<char *>(("WEAPON_" + info.name).c_str()));
-					if (wh == cur) { uname = info.uiname; break; }
-				}
-		wchar_t wname[96]; wname[0] = L'\0';
-			if (!uname.empty()) { size_t n = uname.size(); if (n > 95) n = 95; size_t cv = 0; mbstowcs_s(&cv, wname, 96, uname.c_str(), n); wname[n] = L'\0'; }
-		if (wname[0]) A11y::speak(wname, true);
-		else A11y::speak(L"weapon", true);
-			}
-			else
-			{
-				A11y::speak(L"unarmed", true);
-			}
-			after_num3:;
-		}
-
-	// NumPad 6 (Global): on-demand money total (USD dollars)
-		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Global && IsKeyJustUp(VK_NUMPAD6))
-		{
-			Ped me = PLAYER::PLAYER_PED_ID();
-			if (ENTITY::DOES_ENTITY_EXIST(me)) {
-				int cur = ReadPlayerMoneyCents(me);
-				// Fallback to last-known stable money if native returns 0
-				extern int g_lastKnownMoneyCents; if (cur <= 0 && g_lastKnownMoneyCents > 0) cur = g_lastKnownMoneyCents;
-				if (cur < 0) cur = 0;
-				int d = cur / 100; int c = cur % 100; if (c < 0) c = -c;
-				wchar_t buf[64];
-				swprintf_s(buf, L"You have %d.%02d$", d, c);
-				A11y::speak(buf, true);
-			}
-		}
-
-	// NumPad 0 (Global): Scan for nearby ground items (herbs, loot, etc.)
-		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Global && IsKeyJustUp(VK_NUMPAD0))
-		{
-			AnnounceNearestGroundItems();
-		}
-
-	// Bodyguard mode: NEW LAYOUT - 1: status, 2: teleport to player, 3: follow close, 4: toggle bodyguard, 6: protection toggle, 7: detailed status
-		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Bodyguard)
-		{
-			// NumPad 1: Quick bodyguard status
-			if (IsKeyJustUp(VK_NUMPAD1)) {
-				if (g_bodyguard && ENTITY::DOES_ENTITY_EXIST(g_bodyguard) && !ENTITY::IS_ENTITY_DEAD(g_bodyguard)) {
-					int hp = ENTITY::GET_ENTITY_HEALTH(g_bodyguard);
-					int mh = PED::GET_PED_MAX_HEALTH(g_bodyguard); if (mh<=0) mh=1; if (hp>mh) hp=mh; int pct=(int)((hp*100.0f)/(float)mh+0.5f);
-					wchar_t buf[80]; swprintf_s(buf, L"bodyguard health %d%%", pct); A11y::speak(buf, true);
-				} else A11y::speak(L"no bodyguard", true);
-			}
-			
-			// NumPad 2: Teleport bodyguard to player
-			if (IsKeyJustUp(VK_NUMPAD2)) {
-				if (g_bodyguard && ENTITY::DOES_ENTITY_EXIST(g_bodyguard)) {
-					Ped me = PLAYER::PLAYER_PED_ID(); Vector3 p = ENTITY::GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS(me, 0.0f, -1.4f, 0.0f);
-					ENTITY::SET_ENTITY_COORDS(g_bodyguard, p.x, p.y, p.z, FALSE, FALSE, FALSE, TRUE);
-					A11y::speak(L"bodyguard here", true);
-				} else A11y::speak(L"no bodyguard", true);
-			}
-			
-			// NumPad 3: Order close follow
-			if (IsKeyJustUp(VK_NUMPAD3)) {
-				if (g_bodyguard && ENTITY::DOES_ENTITY_EXIST(g_bodyguard)) {
-					Ped me = PLAYER::PLAYER_PED_ID(); AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(g_bodyguard, me, 0.0f, -1.4f, 0.0f, 3.0f, -1, 1.5f, TRUE, FALSE, FALSE, FALSE, FALSE);
-					g_bodyguardLastTaskMs = GetTickCount(); A11y::speak(L"following", true);
-				} else A11y::speak(L"no bodyguard", true);
-			}
-			
-			// NumPad 4: Toggle bodyguard
-			if (IsKeyJustUp(VK_NUMPAD4)) {
-				if (g_bodyguard && ENTITY::DOES_ENTITY_EXIST(g_bodyguard))
-				{
-					// Release from group and tasks, make him wander naturally
-					PED::REMOVE_PED_FROM_GROUP(g_bodyguard);
-					AI::CLEAR_PED_TASKS_IMMEDIATELY(g_bodyguard, TRUE, TRUE);
-					Vector3 here = ENTITY::GET_ENTITY_COORDS(g_bodyguard, TRUE, FALSE);
-					AI::TASK_WANDER_IN_AREA(g_bodyguard, here.x, here.y, here.z, 20.0f, 3.0f, 5.0f, TRUE);
-					ENTITY::SET_ENTITY_INVINCIBLE(g_bodyguard, FALSE);
-					ENTITY::SET_PED_AS_NO_LONGER_NEEDED(&g_bodyguard);
-					g_bodyguard = 0; g_bodyguardLastTaskMs = 0;
-					A11y::speak(L"bodyguard dismissed", true);
-				}
-				else
-				{
-					Ped me = PLAYER::PLAYER_PED_ID(); if (!ENTITY::DOES_ENTITY_EXIST(me)) { A11y::speak(L"no player", true); goto after_bg_toggle; }
-					// Choose a guard model
-					DWORD model = GAMEPLAY::GET_HASH_KEY("S_M_M_CORNWALLGUARD_01");
-					if (!STREAMING::IS_MODEL_IN_CDIMAGE(model) || !STREAMING::IS_MODEL_VALID(model)) { A11y::speak(L"model invalid", true); goto after_bg_toggle; }
-					STREAMING::REQUEST_MODEL(model, FALSE);
-					while (!STREAMING::HAS_MODEL_LOADED(model)) WAIT(0);
-					Vector3 pos = ENTITY::GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS(me, 0.0f, -1.8f, 0.0f);
-					Ped p = PED::CREATE_PED(model, pos.x, pos.y, pos.z, ENTITY::GET_ENTITY_HEADING(me), 0, 0, 0, 0);
-					STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(model);
-					if (!p || !ENTITY::DOES_ENTITY_EXIST(p)) { A11y::speak(L"spawn failed", true); goto after_bg_toggle; }
-					PED::SET_PED_VISIBLE(p, TRUE);
-					// Friendly relationships (match player's default group)
-					Hash myGroup = PED::GET_PED_RELATIONSHIP_GROUP_DEFAULT_HASH(me);
-					PED::SET_PED_RELATIONSHIP_GROUP_HASH(p, myGroup);
-					int grp = PLAYER::GET_PLAYER_GROUP(PLAYER::PLAYER_ID());
-					if (grp) PED::SET_PED_AS_GROUP_MEMBER(p, grp);
-					// Make him durable and capable
-					ENTITY::SET_ENTITY_INVINCIBLE(p, TRUE);
-					PED::SET_PED_ACCURACY(p, 70);
-					PED::SET_PED_COMBAT_ABILITY(p, 2);
-					PED::SET_PED_COMBAT_MOVEMENT(p, 2);
-					// Arm him
-					Hash w = GAMEPLAY::GET_HASH_KEY("WEAPON_REPEATER_CARBINE");
-					WEAPON::GIVE_DELAYED_WEAPON_TO_PED(p, w, 120, 1, 0x2cd419dc);
-					WEAPON::SET_CURRENT_PED_WEAPON(p, w, 1, 0, 0, 0);
-					// Follow player
-					AI::TASK_CLEAR_LOOK_AT(p);
-					AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(p, me, 0.0f, -1.6f, 0.0f, 2.0f, -1, 1.5f, TRUE, FALSE, FALSE, FALSE, FALSE);
-					g_bodyguard = p; g_bodyguardLastTaskMs = GetTickCount();
-					A11y::speak(L"bodyguard ready", true);
-				}
-				after_bg_toggle:;
-			}
-			
-			// NumPad 6: Toggle auto-protection (choke and burn hostiles)
-			if (IsKeyJustUp(VK_NUMPAD6)) {
-				g_protectionEnabled = !g_protectionEnabled;
-				if (g_protectionEnabled) {
-					A11y::speak(L"Protection activated. Guards will eliminate all threats.", true);
-				} else {
-					A11y::speak(L"Protection deactivated. Guards on standby.", true);
-				}
-			}
-			
-			// NumPad 7: Detailed bodyguard status
-			if (IsKeyJustUp(VK_NUMPAD7)) {
-				if (g_bodyguard && ENTITY::DOES_ENTITY_EXIST(g_bodyguard) && !ENTITY::IS_ENTITY_DEAD(g_bodyguard)) {
-					int hp = ENTITY::GET_ENTITY_HEALTH(g_bodyguard);
-					int mh = PED::GET_PED_MAX_HEALTH(g_bodyguard); if (mh<=0) mh=1; if (hp>mh) hp=mh; int pct=(int)((hp*100.0f)/(float)mh+0.5f);
-					bool inCombat = PED::IS_PED_IN_COMBAT(g_bodyguard, 0) ? true : false;
-					wchar_t buf[120]; swprintf_s(buf, L"bodyguard health %d of %d (%d%%), %s", hp, mh, pct, inCombat ? L"in combat" : L"ready");
-					A11y::speak(buf, true);
-				} else A11y::speak(L"no bodyguard", true);
-			}
-		}
-
-<<<<<<< HEAD
-		// Wolves mode: NEW LAYOUT - 1: status, 2: gather, 3: call/regroup, 4: toggle wolf, 6: attack, 7: increase pack, 8: decrease pack, 9: pack status, 0: clear pack
-=======
-		// Bodyguard mode: squad hotkeys outside menu for quick control
-		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Bodyguard)
-		{
-			// Numpad 7: Follow me (active squad) using current formation
-			if (IsKeyJustUp(VK_NUMPAD7))
-			{
-				if (g_activeSquad < 0 || g_activeSquad >= (int)g_squads.size()) { A11y::speak(L"no squad", true); }
-				else {
-					Ped me = PLAYER::PLAYER_PED_ID(); if (!ENTITY::DOES_ENTITY_EXIST(me)) { A11y::speak(L"no player", true); }
-					else {
-						int i = 0; int applied = 0;
-						for (auto &gi : g_squads[g_activeSquad].guards) {
-							Ped p = gi.ped; if (!p || !ENTITY::DOES_ENTITY_EXIST(p) || ENTITY::IS_ENTITY_DEAD(p)) continue;
-							bool mounted = PED::IS_PED_ON_MOUNT(p) ? true : false;
-							float ox=0.0f, oy=0.0f; GetFormationOffset(i, g_activeFormation, mounted, ox, oy); ++i;
-							AI::TASK_CLEAR_LOOK_AT(p);
-							CommandGuardFollowOffset(gi, me, ox, oy);
-							++applied;
-						}
-						g_activeSquadOrder = SquadOrder::Follow;
-						wchar_t buf[64]; swprintf_s(buf, L"follow %d", applied); A11y::speak(buf, true);
-					}
-				}
-			}
-	    // Numpad 8: Hold position (stand still for a while)
-			if (IsKeyJustUp(VK_NUMPAD8))
-			{
-				if (g_activeSquad < 0 || g_activeSquad >= (int)g_squads.size()) { A11y::speak(L"no squad", true); }
-				else {
-					int applied = 0;
-					for (auto &gi : g_squads[g_activeSquad].guards) {
-						Ped p = gi.ped; if (!p || !ENTITY::DOES_ENTITY_EXIST(p) || ENTITY::IS_ENTITY_DEAD(p)) continue;
-						AI::CLEAR_PED_TASKS(p, TRUE, TRUE);
-						AI::TASK_STAND_STILL(p, 15000);
-						++applied;
-					}
-		    g_activeSquadOrder = SquadOrder::Hold;
-					wchar_t buf[64]; swprintf_s(buf, L"hold %d", applied); A11y::speak(buf, true);
-				}
-			}
-			// Numpad 9: Guard here (stand guard around player position)
-			if (IsKeyJustUp(VK_NUMPAD9))
-			{
-				if (g_activeSquad < 0 || g_activeSquad >= (int)g_squads.size()) { A11y::speak(L"no squad", true); }
-				else {
-					Ped me = PLAYER::PLAYER_PED_ID(); if (!ENTITY::DOES_ENTITY_EXIST(me)) { A11y::speak(L"no player", true); }
-					else {
-						Vector3 c = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
-						float baseH = ENTITY::GET_ENTITY_HEADING(me);
-						int applied = 0; int i = 0;
-						static const float ring[5][3] = { {1.5f,0.0f,0.0f}, {-1.5f,0.0f,0.0f}, {0.0f,1.5f,0.0f}, {0.0f,-1.5f,0.0f}, {2.0f,0.8f,0.0f} };
-						for (auto &gi : g_squads[g_activeSquad].guards) {
-							Ped p = gi.ped; if (!p || !ENTITY::DOES_ENTITY_EXIST(p) || ENTITY::IS_ENTITY_DEAD(p)) continue;
-							float dx = ring[i%5][0], dy = ring[i%5][1]; ++i;
-							float hx = c.x + dx, hy = c.y + dy, hz = c.z + ring[(i-1)%5][2];
-							AI::CLEAR_PED_TASKS(p, TRUE, TRUE);
-							AI::TASK_STAND_GUARD(p, hx, hy, hz, baseH, (char*)"WORLD_HUMAN_STAND_GUARD");
-							++applied;
-						}
-						g_activeSquadOrder = SquadOrder::GuardHere; g_guardHerePos = c;
-						wchar_t buf[64]; swprintf_s(buf, L"guard %d", applied); A11y::speak(buf, true);
-					}
-				}
-			}
-			// Numpad 6: Toggle auto-defense system (30m protection radius)
-			if (IsKeyJustUp(VK_NUMPAD6))
-			{
-				g_autoDefenseEnabled = !g_autoDefenseEnabled;
-				if (g_autoDefenseEnabled) {
-					A11y::speak(L"Protection activated. Guards on duty.", true);
-				} else {
-					A11y::speak(L"Protection deactivated. Stand down.", true);
-				}
-			}
-			// Numpad 0: Regroup to me (teleport into formation slots)
-			if (IsKeyJustUp(VK_NUMPAD0))
-			{
-				if (g_activeSquad < 0 || g_activeSquad >= (int)g_squads.size()) { A11y::speak(L"no squad", true); }
-				else {
-					Ped me = PLAYER::PLAYER_PED_ID(); if (!ENTITY::DOES_ENTITY_EXIST(me)) { A11y::speak(L"no player", true); }
-					else {
-						int i = 0; int applied = 0;
-						for (auto &gi : g_squads[g_activeSquad].guards) {
-							Ped p = gi.ped; if (!p || !ENTITY::DOES_ENTITY_EXIST(p) || ENTITY::IS_ENTITY_DEAD(p)) continue;
-							bool mounted = PED::IS_PED_ON_MOUNT(p) ? true : false;
-							float ox=0.0f, oy=0.0f; GetFormationOffset(i, g_activeFormation, mounted, ox, oy); ++i;
-							Vector3 to = ENTITY::GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS(me, ox, oy, 0.0f);
-							// If mounted, teleport the horse first to avoid separation
-							if (mounted && gi.horse && ENTITY::DOES_ENTITY_EXIST(gi.horse)) {
-								ENTITY::SET_ENTITY_COORDS(gi.horse, to.x, to.y, to.z, FALSE, FALSE, FALSE, TRUE);
-							}
-							ENTITY::SET_ENTITY_COORDS(p, to.x, to.y, to.z, FALSE, FALSE, FALSE, TRUE);
-							++applied;
-						}
-						g_activeSquadOrder = SquadOrder::Follow;
-						wchar_t buf[64]; swprintf_s(buf, L"regroup %d", applied); A11y::speak(buf, true);
-					}
+					DebugLog::log("Arrived at target: %ls", g_navTargetName);
 				}
 			}
 		}
 
-		// Patrol maintenance: every ~8 seconds, if Patrol order is active, issue small wander tasks around player (tighter range to feel less random)
-		if (g_a11yMode == A11yMode::Bodyguard && g_activeSquad >= 0 && g_activeSquad < (int)g_squads.size()) {
-			DWORD now = GetTickCount();
-			if (g_activeSquadOrder == SquadOrder::Patrol && now - g_lastPatrolTickMs > 8000) {
-				Ped me = PLAYER::PLAYER_PED_ID(); if (ENTITY::DOES_ENTITY_EXIST(me)) {
-					Vector3 c = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
-					int i = 0;
-					for (auto &gi : g_squads[g_activeSquad].guards) {
-						Ped p = gi.ped; if (!p || !ENTITY::DOES_ENTITY_EXIST(p) || ENTITY::IS_ENTITY_DEAD(p)) continue;
-						float rx = ((GAMEPLAY::GET_RANDOM_INT_IN_RANGE(-100,101))/100.0f) * 2.5f; // +/-2.5m
-						float ry = ((GAMEPLAY::GET_RANDOM_INT_IN_RANGE(-100,101))/100.0f) * 2.5f;
-						AI::TASK_WANDER_IN_AREA(p, c.x + rx, c.y + ry, c.z, 4.0f, 1.8f, 3.5f, TRUE);
-						++i;
-					}
-				}
-				g_lastPatrolTickMs = now;
-			}
-		}
-
-		// Squad auto-defense: regularly scan for attackers near the player and engage automatically (except when on Hold)
-		if (g_a11yMode == A11yMode::Bodyguard && g_activeSquad >= 0 && g_activeSquad < (int)g_squads.size()) {
-			DWORD now = GetTickCount();
-			if (now - g_lastGuardDefenseTickMs > 700) {
-				g_lastGuardDefenseTickMs = now;
-				if (g_activeSquadOrder != SquadOrder::Hold) {
-					Ped me = PLAYER::PLAYER_PED_ID();
-					if (ENTITY::DOES_ENTITY_EXIST(me)) {
-						// Build a small list of current attackers/threat suspects
-						Ped attackers[24]; int attackerN = 0;
-						Vector3 meC = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
-						int packed[33] = { 32 };
-						int count = PED::GET_PED_NEARBY_PEDS(me, packed, -1, 0);
-						bool meleeDanger = PED::IS_PED_IN_MELEE_COMBAT(me) ? true : false;
-						if (count > 0) {
-							int lim = packed[0]; if (lim > 32) lim = 32;
-							for (int i = 1; i <= lim; ++i) {
-								Ped q = (Ped)packed[i];
-								if (!q || q == me) continue;
-								if (!ENTITY::DOES_ENTITY_EXIST(q) || ENTITY::IS_ENTITY_DEAD(q) || PED::IS_PED_A_PLAYER(q)) continue;
-								Vector3 qc = ENTITY::GET_ENTITY_COORDS(q, TRUE, FALSE);
-								float d = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(meC.x, meC.y, meC.z, qc.x, qc.y, qc.z, TRUE);
-								if (d > 65.0f) continue;
-								bool shot = PED::IS_PED_SHOOTING(q) ? true : false;
-								bool attackingMe = PED::IS_PED_IN_COMBAT(q, me) ? true : false;
-								bool damaged = ENTITY::HAS_ENTITY_BEEN_DAMAGED_BY_ENTITY(me, q, TRUE, FALSE) ? true : false;
-								bool closeMelee = (d < 6.5f) && (PED::IS_PED_IN_MELEE_COMBAT(q) || meleeDanger);
-								if (shot || attackingMe || damaged || closeMelee) {
-									if (attackerN < 24) attackers[attackerN++] = q;
-								}
-							}
-						}
-						if (attackerN > 0) {
-							// Order each guard to engage one of the attackers; keep it lightweight to avoid task spam
-							auto &sq = g_squads[g_activeSquad]; int idx = 0;
-							for (auto &gi : sq.guards) {
-								Ped gp = gi.ped; if (!gp || !ENTITY::DOES_ENTITY_EXIST(gp) || ENTITY::IS_ENTITY_DEAD(gp)) continue;
-								if (PED::IS_PED_IN_COMBAT(gp, 0)) continue; // already fighting
-								Ped tgt = attackers[idx % attackerN]; idx++;
-								PED::SET_PED_COMBAT_ABILITY(gp, 2);
-								PED::SET_PED_COMBAT_MOVEMENT(gp, 2);
-								PED::SET_PED_FLEE_ATTRIBUTES(gp, 0, FALSE);
-								PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(gp, TRUE);
-								AI::TASK_COMBAT_PED(gp, tgt, 0, 0);
-							}
-							// Clear last damage so we don't retrigger endlessly on old hits
-							ENTITY::CLEAR_ENTITY_LAST_DAMAGE_ENTITY(me);
-						}
-					}
-				}
-			}
-			// Formation maintenance: every ~1.2s gently refresh follow tasks to maintain spacing
-			if (g_activeSquadOrder == SquadOrder::Follow && (GetTickCount() - g_lastFormationTickMs) > 1200) {
-				g_lastFormationTickMs = GetTickCount();
-				Ped me = PLAYER::PLAYER_PED_ID(); if (ENTITY::DOES_ENTITY_EXIST(me)) {
-					int i = 0;
-					for (auto &gi : g_squads[g_activeSquad].guards) {
-						Ped p = gi.ped; if (!p || !ENTITY::DOES_ENTITY_EXIST(p) || ENTITY::IS_ENTITY_DEAD(p)) continue;
-						bool mounted = PED::IS_PED_ON_MOUNT(p) ? true : false;
-						float ox=0.0f, oy=0.0f; GetFormationOffset(i, g_activeFormation, mounted, ox, oy); ++i;
-						CommandGuardFollowOffset(gi, me, ox, oy);
-					}
-				}
-			}
-			// Mount enforcement: make sure each guard stays mounted if a horse exists
-			if ((GetTickCount() - g_lastMountEnforceTickMs) > 1500) {
-				g_lastMountEnforceTickMs = GetTickCount();
-				for (auto &gi : g_squads[g_activeSquad].guards) {
-					if (!gi.ped || !ENTITY::DOES_ENTITY_EXIST(gi.ped) || !gi.horse || !ENTITY::DOES_ENTITY_EXIST(gi.horse)) continue;
-					bool on = PED::IS_PED_ON_MOUNT(gi.ped) ? true : false;
-					if (!on) {
-						// Walk to horse; keep horse still for a moment
-						Vector3 hp = ENTITY::GET_ENTITY_COORDS(gi.horse, TRUE, FALSE);
-						AI::TASK_STAND_STILL(gi.horse, 2200);
-						AI::TASK_GO_TO_COORD_ANY_MEANS(gi.ped, hp.x, hp.y, hp.z, 2.6f, 0, FALSE, 0, 0.0f);
-					}
-				}
-			}
-			// Crowd control: keep a calm bubble around player and clear path ahead
-			if ((GetTickCount() - g_lastCrowdControlTickMs) > 900) {
-				g_lastCrowdControlTickMs = GetTickCount();
-				Ped me = PLAYER::PLAYER_PED_ID(); if (ENTITY::DOES_ENTITY_EXIST(me)) {
-					Vector3 meC = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
-					// Desired bubble radius larger when we are mounted to give space
-					bool playerMounted = PED::IS_PED_ON_MOUNT(me) ? true : false;
-					float bubbleR = playerMounted ? 5.0f : 3.4f;
-					int packed[33] = { 32 };
-					int count = PED::GET_PED_NEARBY_PEDS(me, packed, -1, 0);
-					if (count > 0) {
-						int lim = packed[0]; if (lim > 32) lim = 32;
-						for (int i = 1; i <= lim; ++i) {
-							Ped p = (Ped)packed[i]; if (!p || p == me) continue;
-							if (!ENTITY::DOES_ENTITY_EXIST(p) || ENTITY::IS_ENTITY_DEAD(p) || PED::IS_PED_A_PLAYER(p)) continue;
-							if (IsOurGuard(p) || IsOurHorse(p)) continue; // don't push our squad
-							Vector3 pc = ENTITY::GET_ENTITY_COORDS(p, TRUE, FALSE);
-							float d = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(meC.x, meC.y, meC.z, pc.x, pc.y, pc.z, TRUE);
-							if (d < bubbleR) {
-								// Non-violent nudge: ask the nearest guard to escort this ped a few meters away
-								Ped escort = 0; float best = 99999.0f;
-								for (auto &gi : g_squads[g_activeSquad].guards) {
-									if (!gi.ped || !ENTITY::DOES_ENTITY_EXIST(gi.ped) || ENTITY::IS_ENTITY_DEAD(gi.ped)) continue;
-									Vector3 gc = ENTITY::GET_ENTITY_COORDS(gi.ped, TRUE, FALSE);
-									float dd = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(gc.x, gc.y, gc.z, pc.x, pc.y, pc.z, TRUE);
-									if (dd < best) { best = dd; escort = gi.ped; }
-								}
-								if (escort) {
-									// Pick a point slightly further from player in the same direction
-									Vector3 dir = { pc.x - meC.x, pc.y - meC.y, 0.0f };
-									float len = sqrtf(dir.x*dir.x + dir.y*dir.y);
-									if (len < 0.001f) len = 0.001f; dir.x/=len; dir.y/=len;
-									float pushDist = playerMounted ? 6.0f : 4.0f;
-									Vector3 tgt = { meC.x + dir.x * (pushDist + 1.0f), meC.y + dir.y * (pushDist + 1.0f), pc.z };
-									// Ask stranger to move (task go to), and guard to accompany nearby
-									AI::TASK_GO_TO_COORD_ANY_MEANS(p, tgt.x, tgt.y, tgt.z, 1.4f, 0, FALSE, 0, 0.0f);
-									AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(escort, p, 0.0f, -1.5f, 0.0f, 1.6f, 2200, 1.2f, TRUE, FALSE, FALSE, FALSE, FALSE);
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-
-		// Wolves mode: 1 status, 2 gather, 3 call/regroup, 4 toggle, 6 attack, 7 increase, 8 decrease
->>>>>>> c5a4ce1d4f87f6c1ac8d406db559871b886cf940
-		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Wolves)
-		{
-			// NumPad 1: Wolf status
-			if (IsKeyJustUp(VK_NUMPAD1)) {
-				if (g_wolf && ENTITY::DOES_ENTITY_EXIST(g_wolf) && !ENTITY::IS_ENTITY_DEAD(g_wolf)) {
-					int hp = ENTITY::GET_ENTITY_HEALTH(g_wolf); int mh = PED::GET_PED_MAX_HEALTH(g_wolf); if(mh<=0) mh=1; if(hp>mh) hp=mh; int pct=(int)((hp*100.0f)/(float)mh+0.5f);
-					wchar_t buf[64]; swprintf_s(buf, L"wolf health %d (%d%%)", hp, pct); A11y::speak(buf, true);
-				} else A11y::speak(L"no wolf", true);
+		if (!menuController->HasActiveMenu()) {
+			// Keyboard input
+			if (MenuInput::MenuSwitchPressed()) {
+				MenuInput::MenuInputBeep();
+				menuController->PushMenu(mainMenu);
 			}
 			
-			// NumPad 2: Gather pack
-			if (IsKeyJustUp(VK_NUMPAD2)) {
-				if (g_wolf && ENTITY::DOES_ENTITY_EXIST(g_wolf) && !ENTITY::IS_ENTITY_DEAD(g_wolf)) {
-					Ped me = PLAYER::PLAYER_PED_ID(); if (ENTITY::DOES_ENTITY_EXIST(me)) {
-						AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(g_wolf, me, -0.5f, -1.6f, 0.0f, 3.2f, 2500, 1.5f, TRUE, FALSE, FALSE, FALSE, FALSE);
-						for (int i=0;i<g_wolfPackSize;++i){ Ped wp=g_wolfPack[i]; if(!wp||ENTITY::IS_ENTITY_DEAD(wp)) continue; AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(wp, me, -0.6f, -2.0f, 0.0f, 3.0f, 2500, 1.5f, TRUE, FALSE, FALSE, FALSE, FALSE);} A11y::speak(L"gather", true);
-					}
-				} else A11y::speak(L"no wolf", true);
-			}
+			// Controller input: R1 + X to open menu
+			XController::UpdateState();
+			bool r1Held = XController::IsButtonDown(0, XController::BTN_RB);
+			bool xJustPressed = XController::IsButtonJustPressed(0, XController::BTN_X);
 			
-			// NumPad 3: Call/regroup near player
-			if (IsKeyJustUp(VK_NUMPAD3)) {
-				if (!(g_wolf && ENTITY::DOES_ENTITY_EXIST(g_wolf) && !ENTITY::IS_ENTITY_DEAD(g_wolf))) { A11y::speak(L"no wolf", true); }
-				else {
-					Ped me = PLAYER::PLAYER_PED_ID();
-					bool didCall = TryPlayerCall(me);
-					TryFrontendBeep();
-					g_forcedHowlAll = true; g_forcedHowlAtMs = GetTickCount() + 500;
-					int maxAllowed = (g_targetPackSize > 0 ? g_targetPackSize : MAX_WOLF_PACK);
-					if (g_wolfPackSize < maxAllowed) { g_howlsRemaining = (g_howlsRemaining < 2 ? 2 : g_howlsRemaining); g_nextHowlAtMs = GetTickCount(); }
-					A11y::speak(didCall ? L"calling" : L"call", true);
-					if (ENTITY::DOES_ENTITY_EXIST(me)) {
-						AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(g_wolf, me, -0.5f, -1.6f, 0.0f, 3.2f, 2000, 1.5f, TRUE, FALSE, FALSE, FALSE, FALSE);
-						g_wolfLastTaskMs = GetTickCount();
-						for (int i = 0; i < g_wolfPackSize; ++i) {
-							Ped wp = g_wolfPack[i]; if (!wp || ENTITY::IS_ENTITY_DEAD(wp)) continue;
-							AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(wp, me, -0.6f, -2.0f, 0.0f, 3.2f, 2000, 1.5f, TRUE, FALSE, FALSE, FALSE, FALSE);
-						}
-					}
-				}
-			}
-			
-			// NumPad 4: Toggle wolf companion
-			if (IsKeyJustUp(VK_NUMPAD4)) {
-				if (g_wolf && ENTITY::DOES_ENTITY_EXIST(g_wolf))
-				{
-					AI::CLEAR_PED_TASKS_IMMEDIATELY(g_wolf, TRUE, TRUE);
-					Vector3 here = ENTITY::GET_ENTITY_COORDS(g_wolf, TRUE, FALSE);
-					AI::TASK_WANDER_IN_AREA(g_wolf, here.x, here.y, here.z, 30.0f, 4.0f, 6.0f, TRUE);
-					ENTITY::SET_PED_AS_NO_LONGER_NEEDED(&g_wolf);
-					g_wolf = 0; g_wolfLastTaskMs = 0; g_wolfRespawnAtMs = 0;
-					// Dismiss wolf pack if any
-					for (int i = 0; i < g_wolfPackSize; ++i) {
-						Ped wp = g_wolfPack[i];
-						if (wp && ENTITY::DOES_ENTITY_EXIST(wp)) {
-							Vector3 wph = ENTITY::GET_ENTITY_COORDS(wp, TRUE, FALSE);
-							AI::CLEAR_PED_TASKS_IMMEDIATELY(wp, TRUE, TRUE);
-							AI::TASK_WANDER_IN_AREA(wp, wph.x, wph.y, wph.z, 40.0f, 3.0f, 6.0f, TRUE);
-							ENTITY::SET_PED_AS_NO_LONGER_NEEDED(&wp);
-						}
-						g_wolfPack[i] = 0;
-					}
-					g_wolfPackSize = 0; g_howlsRemaining = 0; g_nextHowlAtMs = 0; g_lastAttackSeenMs = 0; g_packCooldownUntilMs = GetTickCount() + 3000; g_targetPackSize = 0; // reset persistent pack when dismissing
-					A11y::speak(L"wolf dismissed", true);
-				}
-				else
-				{
-					Ped me = PLAYER::PLAYER_PED_ID(); if (!ENTITY::DOES_ENTITY_EXIST(me)) { A11y::speak(L"no player", true); goto after_wolf_toggle; }
-					DWORD model = GAMEPLAY::GET_HASH_KEY("A_C_WOLF");
-					if (!STREAMING::IS_MODEL_IN_CDIMAGE(model) || !STREAMING::IS_MODEL_VALID(model)) { A11y::speak(L"wolf model invalid", true); goto after_wolf_toggle; }
-					STREAMING::REQUEST_MODEL(model, FALSE);
-					while (!STREAMING::HAS_MODEL_LOADED(model)) WAIT(0);
-					Vector3 pos = ENTITY::GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS(me, -1.0f, -2.2f, 0.0f);
-					Ped p = PED::CREATE_PED(model, pos.x, pos.y, pos.z, ENTITY::GET_ENTITY_HEADING(me), 0, 0, 0, 0);
-					STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(model);
-					if (!p || !ENTITY::DOES_ENTITY_EXIST(p)) { A11y::speak(L"wolf spawn failed", true); goto after_wolf_toggle; }
-					PED::SET_PED_VISIBLE(p, TRUE);
-					// Be friendly to player
-					Hash myGroup = PED::GET_PED_RELATIONSHIP_GROUP_DEFAULT_HASH(me);
-					PED::SET_PED_RELATIONSHIP_GROUP_HASH(p, myGroup);
-					PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(p, TRUE);
-					PED::SET_PED_COMBAT_ABILITY(p, 2);
-					PED::SET_PED_COMBAT_MOVEMENT(p, 2);
-					PED::SET_PED_FLEE_ATTRIBUTES(p, 0, FALSE);
-					// Follow player
-					AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(p, me, -0.5f, -1.8f, 0.0f, 2.2f, -1, 1.5f, TRUE, FALSE, FALSE, FALSE, FALSE);
-					g_wolf = p; g_wolfLastTaskMs = GetTickCount(); g_wolfRespawnAtMs = 0; g_targetPackSize = 1; // default to one helper when (re)spawning
-					A11y::speak(L"wolf ready", true);
-				}
-				after_wolf_toggle:;
-			}
-			
-			// NumPad 7: Increase pack size (+2)
-			if (IsKeyJustUp(VK_NUMPAD7)) {
-				if (g_wolf && ENTITY::DOES_ENTITY_EXIST(g_wolf) && !ENTITY::IS_ENTITY_DEAD(g_wolf))
-				{
-					// Each press increases desired pack by 2 up to MAX_WOLF_PACK
-					int before = g_targetPackSize;
-					g_targetPackSize += 2; if (g_targetPackSize > MAX_WOLF_PACK) g_targetPackSize = MAX_WOLF_PACK;
-					int need = g_targetPackSize - g_wolfPackSize; if (need < 0) need = 0;
-					if (need > 0)
-					{
-						DWORD now = GetTickCount();
-						// schedule a burst of howls to start summoning
-						g_howlsRemaining = (need * 2 > 6 ? 6 : need * 2);
-						g_nextHowlAtMs = now; g_packCooldownUntilMs = now + 1000; // short cooldown for manual
-						A11y::speak(L"wolf howls for the pack", true);
-						// Try to play an actual howl on the main wolf for feedback
-						TryWolfHowl(g_wolf);
-					}
-					else
-					{
-						A11y::speak(L"pack ready", true);
-					}
-				}
-				else
-				{
-					A11y::speak(L"no wolf", true);
-				}
-			}
-			
-			// NumPad 8: Decrease pack size (-1)
-			if (IsKeyJustUp(VK_NUMPAD8)) {
-				if (g_targetPackSize > 0) {
-					g_targetPackSize -= 1; if (g_targetPackSize < 0) g_targetPackSize = 0;
-					// If we now have more helpers than target, dismiss one immediately
-					if (g_wolfPackSize > g_targetPackSize) {
-						int idx = g_wolfPackSize - 1;
-						Ped wp = g_wolfPack[idx];
-						if (wp && ENTITY::DOES_ENTITY_EXIST(wp)) {
-							Vector3 wph = ENTITY::GET_ENTITY_COORDS(wp, TRUE, FALSE);
-							AI::CLEAR_PED_TASKS_IMMEDIATELY(wp, TRUE, TRUE);
-							AI::TASK_WANDER_IN_AREA(wp, wph.x, wph.y, wph.z, 50.0f, 3.0f, 6.0f, TRUE);
-							ENTITY::SET_PED_AS_NO_LONGER_NEEDED(&wp);
-						}
-						g_wolfPack[idx] = 0; g_wolfPackSize -= 1;
-					}
-				}
-				wchar_t buf[64]; swprintf_s(buf, L"pack %d", g_targetPackSize);
-				A11y::speak(buf, true);
-			}
-			
-			// NumPad 9: Pack status
-			if (IsKeyJustUp(VK_NUMPAD9)) {
-				wchar_t buf[64]; swprintf_s(buf, L"pack %d", g_wolfPackSize);
-				A11y::speak(buf, true);
-			}
-			
-			// NumPad 6: Command attack
-			if (IsKeyJustUp(VK_NUMPAD6)) {
-				Entity t = 0; Player pl = PLAYER::PLAYER_ID();
-				if (!PLAYER::GET_ENTITY_PLAYER_IS_FREE_AIMING_AT(pl, &t) || !ENTITY::DOES_ENTITY_EXIST(t)) {
-					Ped me = PLAYER::PLAYER_PED_ID(); Ped mt = PED::GET_MELEE_TARGET_FOR_PED(me); if (mt && ENTITY::DOES_ENTITY_EXIST(mt)) t = mt;
-					if ((!t || !ENTITY::DOES_ENTITY_EXIST(t)) && lastAimedEntity && ENTITY::DOES_ENTITY_EXIST(lastAimedEntity)) t = lastAimedEntity;
-				}
-				if (t && ENTITY::DOES_ENTITY_EXIST(t) && ENTITY::IS_ENTITY_A_PED(t)) {
-					bool wolfReady = (g_wolf && ENTITY::DOES_ENTITY_EXIST(g_wolf) && !ENTITY::IS_ENTITY_DEAD(g_wolf));
-					if (wolfReady) {
-						PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(g_wolf, TRUE);
-						PED::SET_PED_COMBAT_ABILITY(g_wolf, 2);
-						PED::SET_PED_COMBAT_MOVEMENT(g_wolf, 2);
-						PED::SET_PED_FLEE_ATTRIBUTES(g_wolf, 0, FALSE);
-						AI::TASK_COMBAT_PED(g_wolf, (Ped)t, 0, 0);
-						g_pendingAttackTarget = t; A11y::speak(L"wolf attacking", true);
-					} else { A11y::speak(L"no wolf", true); }
-				} else { A11y::speak(L"no target", true); }
-			}
-			
-			// NumPad 0: Clear/dismiss helper pack (keep main wolf)
-			if (IsKeyJustUp(VK_NUMPAD0)) {
-				g_targetPackSize = 0;
-				for (int i = 0; i < g_wolfPackSize; ++i) {
-					Ped wp = g_wolfPack[i];
-					if (wp && ENTITY::DOES_ENTITY_EXIST(wp)) {
-						Vector3 wph = ENTITY::GET_ENTITY_COORDS(wp, TRUE, FALSE);
-						AI::CLEAR_PED_TASKS_IMMEDIATELY(wp, TRUE, TRUE);
-						AI::TASK_WANDER_IN_AREA(wp, wph.x, wph.y, wph.z, 50.0f, 3.0f, 6.0f, TRUE);
-						ENTITY::SET_PED_AS_NO_LONGER_NEEDED(&wp);
-					}
-					g_wolfPack[i] = 0;
-				}
-				g_wolfPackSize = 0; g_howlsRemaining = 0; g_nextHowlAtMs = 0;
-				A11y::speak(L"pack 0", true);
-			}
-		}
-
-		// NumPad 4 (Global): On-demand location using enhanced detection
-		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Global && IsKeyJustUp(VK_NUMPAD4))
-		{
-<<<<<<< HEAD
-			wchar_t locationResult[256] = L"";
-			if (GetCurrentLocationName(locationResult, 256)) {
-				A11y::speak(locationResult, true);
-			} else {
-				A11y::speak(L"location unknown", true);
-=======
-			// Defer location lookup until the game is fully ready
-			Player player = PLAYER::PLAYER_ID();
-			if (GetTickCount() - startupMs < 6000 || !PLAYER::IS_PLAYER_CONTROL_ON(player) || !CAM::IS_SCREEN_FADED_IN() || DLC2::GET_IS_LOADING_SCREEN_ACTIVE()) {
-				// not ready yet; ignore to avoid false "unknown"/spam
-			} else {
-				Ped me = PLAYER::PLAYER_PED_ID(); if (ENTITY::DOES_ENTITY_EXIST(me)) {
-					Vector3 meC = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
-					std::wstring wlab; if (TryGetZoneLabelAt(meC, wlab)) {
-						DWORD now = GetTickCount();
-						if (wcscmp(wlab.c_str(), g_lastZone) != 0 || (now - g_lastZoneSpeakMs) > 600) {
-							wcsncpy_s(g_lastZone, wlab.c_str(), _TRUNCATE);
-							g_lastZoneSpeakMs = now;
-							A11y::speak(wlab, true);
-						}
-					} else { A11y::speak(L"unknown", true); }
-				}
->>>>>>> c5a4ce1d4f87f6c1ac8d406db559871b886cf940
-			}
-		}
-
-		// NumPad 7/Home (Global): on-demand honor + bounty/wanted status (Home when NumLock is off)
-		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Global && (IsKeyJustUp(VK_NUMPAD7) || IsKeyJustUp(VK_HOME)))
-		{
-			static int lastHonor = INT_MIN; static DWORD lastHonorChangeMs = 0;
-			int honor = 0; bool okHonor = TryReadHonor(honor);
-
-			// Read bounty (head price) and wanted intensity
-			Player pl = PLAYER::PLAYER_ID();
-			int headPriceCents = PURSUIT::GET_PLAYER_PRICE_ON_A_HEAD(pl);
-			int wiRaw = PURSUIT::GET_PLAYER_WANTED_INTENSITY(pl);
-			int wantedPct = wiRaw / 100; if (wantedPct < 0) wantedPct = 0; if (wantedPct > 100) wantedPct = 100;
-			int bountyD = headPriceCents / 100; int bountyC = abs(headPriceCents % 100);
-
-			// Compose message
-			wchar_t buf[192];
-			if (!okHonor) {
-				swprintf_s(buf, L"Honor: unavailable, bounty %d.%02d$, %s%d%%",
-					bountyD, bountyC, (wantedPct>0?L"wanted ":L"wanted "), wantedPct);
-			} else {
-				const wchar_t* trend = L"";
-				if (lastHonor != INT_MIN) {
-					if (honor > lastHonor) trend = L" (increasing)";
-					else if (honor < lastHonor) trend = L" (decreasing)";
-				}
-				swprintf_s(buf, L"Honor: %d%s, bounty %d.%02d$, %s%d%%",
-					honor, trend, bountyD, bountyC, (wantedPct>0?L"wanted ":L"wanted "), wantedPct);
-				if (honor != lastHonor) { lastHonor = honor; lastHonorChangeMs = GetTickCount(); }
-			}
-			A11y::speak(buf, true);
-		}
-
-	// NumPad 7: Wolves mode — make wolf howl and call pack (increase desired pack)
-	if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Wolves && IsKeyJustUp(VK_NUMPAD7))
-		{
-			if (g_wolf && ENTITY::DOES_ENTITY_EXIST(g_wolf) && !ENTITY::IS_ENTITY_DEAD(g_wolf))
-			{
-				// Each press increases desired pack by 2 up to MAX_WOLF_PACK
-				int before = g_targetPackSize;
-				g_targetPackSize += 2; if (g_targetPackSize > MAX_WOLF_PACK) g_targetPackSize = MAX_WOLF_PACK;
-				int need = g_targetPackSize - g_wolfPackSize; if (need < 0) need = 0;
-				if (need > 0)
-				{
-					DWORD now = GetTickCount();
-					// schedule a burst of howls to start summoning
-					g_howlsRemaining = (need * 2 > 6 ? 6 : need * 2);
-					g_nextHowlAtMs = now; g_packCooldownUntilMs = now + 1000; // short cooldown for manual
-					A11y::speak(L"wolf howls for the pack", true);
-					// Try to play an actual howl on the main wolf for feedback
-					TryWolfHowl(g_wolf);
-				}
-				else
-				{
-					A11y::speak(L"pack ready", true);
-				}
-			}
-			else
-			{
-				A11y::speak(L"no wolf", true);
-			}
-		}
-
-		// NumPad '.':
-		// - Global mode: speak heading (existing behavior)
-		// - Bodyguard mode: open Guard Manager menu
-		if (IsKeyJustUp(VK_DECIMAL))
-		{
-			if (!menuController->HasActiveMenu()) {
-				if (g_a11yMode == A11yMode::Global) {
-					Vector3 camRot = CAM::GET_GAMEPLAY_CAM_ROT(2);
-					int b = HeadingBucket(camRot.z);
-					const wchar_t* wname = BucketName8(b);
-					if (wname && *wname) A11y::speak(wname, true); else A11y::speak(L"heading", true);
-				} else if (g_a11yMode == A11yMode::Bodyguard) {
+			if (r1Held && xJustPressed) {
+				if (!lastControllerMenuState) {
 					MenuInput::MenuInputBeep();
-					menuController->PushMenu(guardManagerMenu);
-					A11y::speak(L"Guard Manager", true);
+					menuController->PushMenu(mainMenu);
+					lastControllerMenuState = true;
+				}
+			} else if (!r1Held) {
+				lastControllerMenuState = false;
+			}
+
+			// Numpad mode system (Bodyguard / Global / Horse)
+			HandleNumpadModes();
+
+			// Diagnostic coordinates key: VK_DECIMAL (Numpad Decimal Point .)
+			if (IsKeyJustUp(VK_DECIMAL)) {
+				Ped pp = PLAYER::PLAYER_PED_ID();
+				if (ENTITY::DOES_ENTITY_EXIST(pp)) {
+					Vector3 myPos = ENTITY::GET_ENTITY_COORDS(pp, TRUE, FALSE);
+					float heading = ENTITY::GET_ENTITY_HEADING(pp);
+					DebugLog::log("DIAGNOSTIC: Player coordinates: (%f, %f, %f), Heading: %f", myPos.x, myPos.y, myPos.z, heading);
+					
+					wchar_t announceBuf[256];
+					swprintf_s(announceBuf, L"Logged position: X %d, Y %d, Z %d, heading %d", (int)myPos.x, (int)myPos.y, (int)myPos.z, (int)heading);
+					A11y::speak(announceBuf, false);
+
+					// Scan nearby objects within 8.0 meters
+					int objects[256];
+					int count = worldGetAllObjects(objects, 256);
+					DebugLog::log("DIAGNOSTIC: Scanning nearby objects within 8 meters (found %d total in world):", count);
+					int loggedCount = 0;
+					for (int i = 0; i < count; ++i) {
+						Object obj = objects[i];
+						if (!obj || !ENTITY::DOES_ENTITY_EXIST(obj)) continue;
+						Vector3 oPos = ENTITY::GET_ENTITY_COORDS(obj, TRUE, FALSE);
+						float dist = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(myPos.x, myPos.y, myPos.z, oPos.x, oPos.y, oPos.z, TRUE);
+						if (dist <= 8.0f) {
+							Hash modelHash = ENTITY::GET_ENTITY_MODEL(obj);
+							DebugLog::log("  Object index %d, Hash: 0x%08X, Distance: %f, Position: (%f, %f, %f)", obj, modelHash, dist, oPos.x, oPos.y, oPos.z);
+							loggedCount++;
+						}
+					}
+					DebugLog::log("DIAGNOSTIC: Logged %d nearby objects within 8 meters.", loggedCount);
 				}
 			}
 		}
-
-		// NumPad 0: Clear/dismiss helper pack (keep main wolf)
-		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Wolves && IsKeyJustUp(VK_NUMPAD0))
-		{
-			g_targetPackSize = 0;
-			for (int i = 0; i < g_wolfPackSize; ++i) {
-				Ped wp = g_wolfPack[i];
-				if (wp && ENTITY::DOES_ENTITY_EXIST(wp)) {
-					Vector3 wph = ENTITY::GET_ENTITY_COORDS(wp, TRUE, FALSE);
-					AI::CLEAR_PED_TASKS_IMMEDIATELY(wp, TRUE, TRUE);
-					AI::TASK_WANDER_IN_AREA(wp, wph.x, wph.y, wph.z, 50.0f, 3.0f, 6.0f, TRUE);
-					ENTITY::SET_PED_AS_NO_LONGER_NEEDED(&wp);
-				}
-				g_wolfPack[i] = 0;
-			}
-			g_wolfPackSize = 0; g_howlsRemaining = 0; g_nextHowlAtMs = 0;
-			A11y::speak(L"pack 0", true);
-		}
-
-		// Global: also allow heading on Numpad 8 for sequential layout lovers
-		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::Global && IsKeyJustUp(VK_NUMPAD8))
-		{
-			Vector3 camRot = CAM::GET_GAMEPLAY_CAM_ROT(2);
-			int b = HeadingBucket(camRot.z);
-			const wchar_t* wname = BucketName8(b);
-			if (wname && *wname) A11y::speak(wname, true); else A11y::speak(L"heading", true);
-		}
-
-		// Auto-navigation announcements: zone/place and heading
-		if (!menuController->HasActiveMenu())
-		{
-			DWORD now = GetTickCount();
-			// Zone/place change announcement
-			if (g_enableAutoZones)
-			{
-				// Skip auto zone announcements until the game is fully ready
-				Player player = PLAYER::PLAYER_ID();
-				if (GetTickCount() - startupMs >= 6000 && PLAYER::IS_PLAYER_CONTROL_ON(player) && CAM::IS_SCREEN_FADED_IN() && !DLC2::GET_IS_LOADING_SCREEN_ACTIVE())
-				{
-				Ped me = PLAYER::PLAYER_PED_ID();
-				if (ENTITY::DOES_ENTITY_EXIST(me)) {
-					Vector3 meC = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
-					std::wstring wlab;
-					if (TryGetZoneLabelAt(meC, wlab)) {
-						if (!wlab.empty()) {
-							if (wcscmp(wlab.c_str(), g_lastZone) != 0 && (now - g_lastZoneSpeakMs) > 600) {
-								wcsncpy_s(g_lastZone, wlab.c_str(), _TRUNCATE);
-								g_lastZoneSpeakMs = now;
-								A11y::speak(wlab, true);
-							}
-						}
-					}
-				}
-				}
-			}
-			// Heading announcements (8-way cardinal) on bucket change
-			if (g_enableAutoHeading)
-			{
-				// Use camera heading for player orientation
-				Vector3 camRot = CAM::GET_GAMEPLAY_CAM_ROT(2);
-				float heading = camRot.z; // degrees
-				int b = HeadingBucket(heading);
-				if (b != g_lastHeadingBucket && (now - g_lastHeadingSpeakMs) > 450) {
-					g_lastHeadingBucket = b; g_lastHeadingSpeakMs = now;
-					const wchar_t* wname = BucketName8(b);
-					if (wname && *wname) A11y::speak(wname, true);
-				}
-			}
-		}
-
-		// Auto-speak the entity you're aiming/targeting at (works with and without weapon)
-		if (!menuController->HasActiveMenu())
-		{
-			Player player = PLAYER::PLAYER_ID();
-			// Skip auto features during loading/early startup to avoid invalid data
-			if (GetTickCount() - startupMs < 4000) { menuController->Update(); WAIT(0); continue; }
-			if (!PLAYER::IS_PLAYER_CONTROL_ON(player) || !CAM::IS_SCREEN_FADED_IN() || DLC2::GET_IS_LOADING_SCREEN_ACTIVE()) { menuController->Update(); WAIT(0); continue; }
-
-			// Shared: remember most recent targeted ped and its name/time for money attribution
-			static Entity lastTargetPedForMoney = 0; static DWORD lastTargetPedForMoneyMs = 0; static wchar_t lastTargetPedForMoneyName[128];
-
-			// Auto-announce money changes (e.g., after robbing someone) with stability debounce
-			{
-				static int lastMoneyCents = -1;
-				static int moneyCandidate = -1; static DWORD moneyCandidateSinceMs = 0; static DWORD lastMoneyAnnounceMs = 0; static int lastDeltaCents = 0;
-				Ped me = PLAYER::PLAYER_PED_ID();
-				if (ENTITY::DOES_ENTITY_EXIST(me)) {
-					int cur = ReadPlayerMoneyCents(me);
-					DWORD now = GetTickCount();
-					if (cur != moneyCandidate) { moneyCandidate = cur; moneyCandidateSinceMs = now; }
-					bool stable = (now - moneyCandidateSinceMs >= g_moneyStableMs);
-					if (stable && cur != lastMoneyCents && (now - lastMoneyAnnounceMs > g_moneyMinIntervalMs)) {
-						int delta = (lastMoneyCents >= 0) ? (cur - lastMoneyCents) : 0;
-						lastDeltaCents = delta;
-						// Format as dollars.cents
-						int absDelta = delta < 0 ? -delta : delta;
-						int d_dollars = absDelta / 100; int d_cents = absDelta % 100;
-						int t_dollars = (cur >= 0 ? cur : 0) / 100; int t_cents = (cur >= 0 ? cur : 0) % 100;
-						wchar_t buf[200];
-						if (delta > 0) {
-							// Try attribute to most recent targeted ped within 3s and within 25m
-							bool attributed = false; wchar_t src[128]; src[0] = L'\0';
-							if (lastTargetPedForMoney && ENTITY::DOES_ENTITY_EXIST(lastTargetPedForMoney)) {
-								DWORD ago = now - lastTargetPedForMoneyMs;
-								if (ago <= 3000) {
-									Vector3 meC = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
-									Vector3 sC = ENTITY::GET_ENTITY_COORDS(lastTargetPedForMoney, TRUE, FALSE);
-									float dist = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(meC.x, meC.y, meC.z, sC.x, sC.y, sC.z, TRUE);
-									if (dist <= 25.0f) { wcsncpy_s(src, lastTargetPedForMoneyName, _TRUNCATE); attributed = true; }
-								}
-							}
-							if (attributed && src[0]) swprintf_s(buf, L"%s gave you %d.%02d$ - You have %d.%02d$", src, d_dollars, d_cents, t_dollars, t_cents);
-							else swprintf_s(buf, L"You received %d.%02d$ - You have %d.%02d$", d_dollars, d_cents, t_dollars, t_cents);
-						}
-						else if (delta < 0) swprintf_s(buf, L"You spent %d.%02d$", d_dollars, d_cents);
-						else swprintf_s(buf, L"You have %d.%02d$", t_dollars, t_cents);
-						A11y::speak(buf, true);
-						lastMoneyCents = cur; lastMoneyAnnounceMs = now;
-						g_lastKnownMoneyCents = cur;
-					}
-					else if (lastMoneyCents < 0) {
-						// Initialize baseline silently once stable
-						if (stable) { lastMoneyCents = cur; g_lastKnownMoneyCents = cur; }
-					}
-				}
-			}
-			// Maintain bodyguard behavior (follow/defend) and wolf behavior + respawns
-			if (g_bodyguard && ENTITY::DOES_ENTITY_EXIST(g_bodyguard))
-			{
-				Ped me = PLAYER::PLAYER_PED_ID();
-				if (!ENTITY::IS_ENTITY_DEAD(g_bodyguard))
-				{
-					// Keep near player
-					Vector3 meC = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
-					Vector3 bgC = ENTITY::GET_ENTITY_COORDS(g_bodyguard, TRUE, FALSE);
-					float dist = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(meC.x, meC.y, meC.z, bgC.x, bgC.y, bgC.z, TRUE);
-					DWORD now = GetTickCount();
-					if (dist > 8.0f && now - g_bodyguardLastTaskMs > 800)
-					{
-						AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(g_bodyguard, me, 0.0f, -1.6f, 0.0f, 2.0f, -1, 1.5f, TRUE, FALSE, FALSE, FALSE, FALSE);
-						g_bodyguardLastTaskMs = now;
-					}
-					// Defend against threats around player
-					if (!PED::IS_PED_IN_COMBAT(g_bodyguard, 0))
-					{
-						AI::TASK_COMBAT_HATED_TARGETS_AROUND_PED(g_bodyguard, 32.0f, 0, 0);
-					}
-				}
-				else { g_bodyguard = 0; g_guardRespawnAtMs = GetTickCount() + 2000; }
-			}
-			// Wolf maintenance
-			if (g_wolf && ENTITY::DOES_ENTITY_EXIST(g_wolf))
-			{
-				Ped me = PLAYER::PLAYER_PED_ID();
-				if (!ENTITY::IS_ENTITY_DEAD(g_wolf))
-				{
-					Vector3 meC = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
-					Vector3 wC = ENTITY::GET_ENTITY_COORDS(g_wolf, TRUE, FALSE);
-					float dist = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(meC.x, meC.y, meC.z, wC.x, wC.y, wC.z, TRUE);
-					DWORD now = GetTickCount();
-					if (!PED::IS_PED_IN_COMBAT(g_wolf, 0) && dist > 8.0f && now - g_wolfLastTaskMs > 800)
-					{
-						AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(g_wolf, me, -0.5f, -1.8f, 0.0f, 2.6f, -1, 1.5f, TRUE, FALSE, FALSE, FALSE, FALSE);
-						g_wolfLastTaskMs = now;
-					}
-					// If drifted too far and not in combat, recall more urgently
-					if (!PED::IS_PED_IN_COMBAT(g_wolf, 0) && dist > 35.0f && now - g_wolfLastTaskMs > 400)
-					{
-						AI::CLEAR_PED_TASKS(g_wolf, TRUE, TRUE);
-						AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(g_wolf, me, -0.6f, -2.0f, 0.0f, 3.2f, -1, 1.5f, TRUE, FALSE, FALSE, FALSE, FALSE);
-						g_wolfLastTaskMs = now;
-					}
-					// No auto-combat for main wolf; only attacks on command
-				}
-				else { g_wolf = 0; g_wolfRespawnAtMs = GetTickCount() + 2000; }
-			}
-
-			// Wolf pack maintenance: prune dead, keep close, and top-up to target size
-			{
-				// Compact the pack array and remove dead/missing helpers
-				int write = 0;
-				for (int i = 0; i < g_wolfPackSize; ++i) {
-					Ped wp = g_wolfPack[i];
-					if (!wp || !ENTITY::DOES_ENTITY_EXIST(wp) || ENTITY::IS_ENTITY_DEAD(wp)) {
-						continue; // drop
-					}
-					g_wolfPack[write++] = wp;
-				}
-				if (write != g_wolfPackSize) {
-					g_wolfPackSize = write;
-				}
-				// If below target, trigger howls to replenish silently (keep trying until filled)
-				if (g_wolf && ENTITY::DOES_ENTITY_EXIST(g_wolf) && !ENTITY::IS_ENTITY_DEAD(g_wolf)) {
-					int deficit = g_targetPackSize - g_wolfPackSize;
-					if (deficit > 0 && g_howlsRemaining == 0) { g_howlsRemaining = (deficit > 2 ? 2 : deficit); g_nextHowlAtMs = GetTickCount(); }
-				}
-				// Keep helpers close if idle
-				if (g_wolfPackSize > 0) {
-					Ped me = PLAYER::PLAYER_PED_ID(); Vector3 meC = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
-					for (int i = 0; i < g_wolfPackSize; ++i) {
-						Ped wp = g_wolfPack[i]; if (!wp || ENTITY::IS_ENTITY_DEAD(wp)) continue;
-						Vector3 wc = ENTITY::GET_ENTITY_COORDS(wp, TRUE, FALSE);
-						float d = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(meC.x, meC.y, meC.z, wc.x, wc.y, wc.z, TRUE);
-						if (!PED::IS_PED_IN_COMBAT(wp, 0) && d > 14.0f) {
-							AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(wp, me, -0.8f, -2.4f, 0.0f, 3.0f, -1, 1.5f, TRUE, FALSE, FALSE, FALSE, FALSE);
-						}
-					}
-				}
-			}
-
-			// Shooter/melee/thief detection and wolf-pack assistance
-			{
-				Ped me = PLAYER::PLAYER_PED_ID(); if (ENTITY::DOES_ENTITY_EXIST(me)) {
-					DWORD now = GetTickCount();
-					int packed[33] = { 32 };
-					int count = PED::GET_PED_NEARBY_PEDS(me, packed, -1, 0);
-					bool shooterFound = false; Ped shooters[16]; int shooterN = 0;
-					bool meleeDanger = PED::IS_PED_IN_MELEE_COMBAT(me) ? true : false;
-					bool thiefThreat = false;
-					Ped suspects[24]; int suspectN = 0;
-					if (count > 0) {
-						int lim = packed[0]; if (lim > 32) lim = 32;
-						Vector3 meC = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
-						for (int i = 1; i <= lim; ++i) {
-							Ped p = (Ped)packed[i]; if (!p || p == me) continue;
-							if (!ENTITY::DOES_ENTITY_EXIST(p) || ENTITY::IS_ENTITY_DEAD(p) || PED::IS_PED_A_PLAYER(p)) continue;
-							Vector3 pc = ENTITY::GET_ENTITY_COORDS(p, TRUE, FALSE);
-							float d = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(meC.x, meC.y, meC.z, pc.x, pc.y, pc.z, TRUE);
-							if (d > 70.0f) continue;
-							if (PED::IS_PED_SHOOTING(p)) { shooterFound = true; if (shooterN < 16) shooters[shooterN++] = p; if (suspectN < 24) suspects[suspectN++] = p; }
-							if (d < 3.2f && (PED::IS_PED_IN_MELEE_COMBAT(p) || meleeDanger)) { if (suspectN < 24) suspects[suspectN++] = p; }
-								// Treat nearby fast-moving/fleeing peds as potential thief threats
-								if (d < 4.5f && (AI::IS_MOVE_BLEND_RATIO_SPRINTING(p) || AI::IS_PED_RUNNING(p) || PED::IS_PED_FLEEING(p)) && !PED::IS_PED_IN_COMBAT(p, me)) {
-									thiefThreat = true; if (suspectN < 24) suspects[suspectN++] = p;
-								}
-						}
-					}
-					if (shooterFound || meleeDanger || thiefThreat) {
-						g_lastAttackSeenMs = now;
-						if (now >= g_packCooldownUntilMs && g_howlsRemaining == 0 && g_wolf) {
-							g_howlsRemaining = 4; g_nextHowlAtMs = now; g_packCooldownUntilMs = now + 12000; A11y::speak(L"wolf howls", false);
-							// Safe cue (no audio native)
-							TryWolfHowl(g_wolf);
-						}
-			// If a forced howl after player's call is scheduled, play it now
-			{
-				DWORD now = GetTickCount();
-				if (g_forcedHowlAll && now >= g_forcedHowlAtMs) {
-					int howled = 0;
-					TryFrontendBeep(); // audible cue for wolves answering
-					if (g_wolf && ENTITY::DOES_ENTITY_EXIST(g_wolf) && !ENTITY::IS_ENTITY_DEAD(g_wolf)) {
-						if (TryWolfHowl(g_wolf)) howled++;
-					}
-					for (int i = 0; i < g_wolfPackSize; ++i) {
-						Ped wp = g_wolfPack[i];
-						if (wp && ENTITY::DOES_ENTITY_EXIST(wp) && !ENTITY::IS_ENTITY_DEAD(wp)) {
-							if (TryWolfHowl(wp)) howled++;
-						}
-					}
-					g_forcedHowlAll = false; g_forcedHowlAtMs = 0;
-				}
-			}
-						for (int i = 0; i < g_wolfPackSize; ++i) {
-							Ped wp = g_wolfPack[i]; if (!wp || !ENTITY::DOES_ENTITY_EXIST(wp) || ENTITY::IS_ENTITY_DEAD(wp)) continue;
-							if (!PED::IS_PED_IN_COMBAT(wp, 0)) {
-								Ped tgt = 0;
-								if (suspectN > 0) tgt = suspects[i % suspectN];
-								else if (shooterN > 0) tgt = shooters[i % shooterN];
-								if (tgt) { PED::SET_PED_COMBAT_ABILITY(wp, 2); PED::SET_PED_COMBAT_MOVEMENT(wp, 2); PED::SET_PED_FLEE_ATTRIBUTES(wp, 0, FALSE); PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(wp, TRUE); AI::TASK_COMBAT_PED(wp, tgt, 0, 0); }
-							}
-						}
-					} else {
-						// Only auto-dismiss if user didn't request a persistent pack
-						if (g_wolfPackSize > 0 && g_targetPackSize == 0 && (now - g_lastAttackSeenMs) > 9000) {
-							for (int i = 0; i < g_wolfPackSize; ++i) {
-								Ped wp = g_wolfPack[i];
-								if (wp && ENTITY::DOES_ENTITY_EXIST(wp)) {
-									Vector3 wph = ENTITY::GET_ENTITY_COORDS(wp, TRUE, FALSE);
-									AI::CLEAR_PED_TASKS_IMMEDIATELY(wp, TRUE, TRUE);
-									AI::TASK_WANDER_IN_AREA(wp, wph.x, wph.y, wph.z, 50.0f, 3.0f, 6.0f, TRUE);
-									ENTITY::SET_PED_AS_NO_LONGER_NEEDED(&wp);
-								}
-								g_wolfPack[i] = 0;
-							}
-							g_wolfPackSize = 0; g_howlsRemaining = 0; g_nextHowlAtMs = 0;
-						}
-					}
-				}
-			}
-
-			// Stage howls and spawn helper wolves; retry if a spawn fails instead of silently consuming howls
-			if (g_howlsRemaining > 0 && GetTickCount() >= g_nextHowlAtMs) {
-				Ped me = PLAYER::PLAYER_PED_ID();
-				int maxAllowed = (g_targetPackSize > 0 ? g_targetPackSize : MAX_WOLF_PACK);
-				bool spawned = false;
-				if (ENTITY::DOES_ENTITY_EXIST(me) && g_wolfPackSize < maxAllowed) {
-					DWORD model = GAMEPLAY::GET_HASH_KEY("A_C_WOLF");
-					if (STREAMING::IS_MODEL_IN_CDIMAGE(model) && STREAMING::IS_MODEL_VALID(model)) {
-						STREAMING::REQUEST_MODEL(model, FALSE); while (!STREAMING::HAS_MODEL_LOADED(model)) WAIT(0);
-						Vector3 meC = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
-						float ang = (float)(rand() % 360) * 3.14159265f / 180.0f;
-						float r = 14.0f + (float)(rand() % 60) / 10.0f;
-						Vector3 pos = { meC.x + cosf(ang) * r, meC.y + sinf(ang) * r, meC.z };
-						Ped wp = PED::CREATE_PED(model, pos.x, pos.y, pos.z, 0.0f, 0, 0, 0, 0);
-						STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(model);
-						if (wp && ENTITY::DOES_ENTITY_EXIST(wp)) {
-							PED::SET_PED_VISIBLE(wp, TRUE);
-							Hash myGroup = PED::GET_PED_RELATIONSHIP_GROUP_DEFAULT_HASH(me);
-							PED::SET_PED_RELATIONSHIP_GROUP_HASH(wp, myGroup);
-							PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(wp, TRUE);
-							PED::SET_PED_COMBAT_ABILITY(wp, 2);
-							PED::SET_PED_COMBAT_MOVEMENT(wp, 2);
-							PED::SET_PED_FLEE_ATTRIBUTES(wp, 0, FALSE);
-							AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(wp, me, -0.5f, -2.2f, 0.0f, 3.0f, -1, 1.5f, TRUE, FALSE, FALSE, FALSE, FALSE);
-							g_wolfPack[g_wolfPackSize++] = wp;
-							spawned = true;
-						}
-					}
-				}
-				if (spawned || g_wolfPackSize >= maxAllowed) {
-					g_howlsRemaining--; g_nextHowlAtMs = GetTickCount() + 900;
-				} else {
-					// Retry soon without consuming a howl if we couldn't spawn
-					g_nextHowlAtMs = GetTickCount() + 600;
-				}
-			}
-
-			// Pending human engage after threat window or after wolf death
-			if (g_pendingAttackTarget && ENTITY::DOES_ENTITY_EXIST(g_pendingAttackTarget))
-			{
-				DWORD now = GetTickCount();
-				bool wolfGone = (!g_wolf || !ENTITY::DOES_ENTITY_EXIST(g_wolf) || ENTITY::IS_ENTITY_DEAD(g_wolf));
-				bool guardReady = (g_bodyguard && ENTITY::DOES_ENTITY_EXIST(g_bodyguard) && !ENTITY::IS_ENTITY_DEAD(g_bodyguard));
-				if (guardReady && (wolfGone || (g_humanThreatUntilMs && now > g_humanThreatUntilMs)))
-				{
-					AI::TASK_COMBAT_PED(g_bodyguard, (Ped)g_pendingAttackTarget, 0, 0);
-					AI::TASK_COMBAT_HATED_TARGETS_AROUND_PED(g_bodyguard, 28.0f, 0, 0);
-					g_pendingAttackTarget = 0; g_humanThreatUntilMs = 0;
-				}
-			}
-
-			// Respawn companions from distance and make them run to you
-			{
-				DWORD now = GetTickCount(); Ped me = PLAYER::PLAYER_PED_ID(); if (ENTITY::DOES_ENTITY_EXIST(me))
-				{
-					if (!g_bodyguard && g_guardRespawnAtMs && now >= g_guardRespawnAtMs)
-					{
-						g_guardRespawnAtMs = 0;
-						DWORD model = GAMEPLAY::GET_HASH_KEY("S_M_M_CORNWALLGUARD_01");
-						if (STREAMING::IS_MODEL_IN_CDIMAGE(model) && STREAMING::IS_MODEL_VALID(model))
-						{
-							STREAMING::REQUEST_MODEL(model, FALSE); while (!STREAMING::HAS_MODEL_LOADED(model)) WAIT(0);
-							Vector3 meC = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
-							// spawn ~80m away behind player heading
-							float heading = ENTITY::GET_ENTITY_HEADING(me);
-							float rad = heading * 3.14159265f / 180.0f;
-							Vector3 pos = { meC.x - cosf(rad) * 80.0f, meC.y - sinf(rad) * 80.0f, meC.z };
-							Ped p = PED::CREATE_PED(model, pos.x, pos.y, pos.z, heading, 0, 0, 0, 0);
-							STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(model);
-							if (p && ENTITY::DOES_ENTITY_EXIST(p))
-							{
-								PED::SET_PED_VISIBLE(p, TRUE);
-								Hash myGroup = PED::GET_PED_RELATIONSHIP_GROUP_DEFAULT_HASH(me);
-								PED::SET_PED_RELATIONSHIP_GROUP_HASH(p, myGroup);
-								int grp = PLAYER::GET_PLAYER_GROUP(PLAYER::PLAYER_ID()); if (grp) PED::SET_PED_AS_GROUP_MEMBER(p, grp);
-								ENTITY::SET_ENTITY_INVINCIBLE(p, TRUE);
-								PED::SET_PED_ACCURACY(p, 70);
-								PED::SET_PED_COMBAT_ABILITY(p, 2);
-								PED::SET_PED_COMBAT_MOVEMENT(p, 2);
-								Hash w = GAMEPLAY::GET_HASH_KEY("WEAPON_REPEATER_CARBINE");
-								WEAPON::GIVE_DELAYED_WEAPON_TO_PED(p, w, 120, 1, 0x2cd419dc);
-								WEAPON::SET_CURRENT_PED_WEAPON(p, w, 1, 0, 0, 0);
-								AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(p, me, 0.0f, -1.6f, 0.0f, 3.0f, -1, 1.5f, TRUE, FALSE, FALSE, FALSE, FALSE);
-								g_bodyguard = p; g_bodyguardLastTaskMs = now;
-							}
-						}
-					}
-					if (!g_wolf && g_wolfRespawnAtMs && now >= g_wolfRespawnAtMs)
-					{
-						g_wolfRespawnAtMs = 0;
-						DWORD model = GAMEPLAY::GET_HASH_KEY("A_C_WOLF");
-						if (STREAMING::IS_MODEL_IN_CDIMAGE(model) && STREAMING::IS_MODEL_VALID(model))
-						{
-							STREAMING::REQUEST_MODEL(model, FALSE); while (!STREAMING::HAS_MODEL_LOADED(model)) WAIT(0);
-							Vector3 meC = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
-							float heading = ENTITY::GET_ENTITY_HEADING(me);
-							float rad = heading * 3.14159265f / 180.0f;
-							Vector3 pos = { meC.x - cosf(rad) * 85.0f, meC.y - sinf(rad) * 85.0f, meC.z };
-							Ped p = PED::CREATE_PED(model, pos.x, pos.y, pos.z, heading, 0, 0, 0, 0);
-							STREAMING::SET_MODEL_AS_NO_LONGER_NEEDED(model);
-							if (p && ENTITY::DOES_ENTITY_EXIST(p))
-							{
-								PED::SET_PED_VISIBLE(p, TRUE);
-								Hash myGroup = PED::GET_PED_RELATIONSHIP_GROUP_DEFAULT_HASH(me);
-								PED::SET_PED_RELATIONSHIP_GROUP_HASH(p, myGroup);
-								PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(p, TRUE);
-								PED::SET_PED_COMBAT_ABILITY(p, 2);
-								PED::SET_PED_COMBAT_MOVEMENT(p, 2);
-								PED::SET_PED_FLEE_ATTRIBUTES(p, 0, FALSE);
-								AI::TASK_FOLLOW_TO_OFFSET_OF_ENTITY(p, me, -0.5f, -1.8f, 0.0f, 3.0f, -1, 1.5f, TRUE, FALSE, FALSE, FALSE, FALSE);
-								g_wolf = p; g_wolfLastTaskMs = now;
-							}
-						}
-					}
-				}
-			}
-
-			// Auto-announce on weapon change (name only, with stability debounce)
-			{
-				Ped ped = PLAYER::PLAYER_PED_ID(); if (!ENTITY::DOES_ENTITY_EXIST(ped)) { /* no ped */ }
-				Hash cur = 0; BOOL got = WEAPON::GET_CURRENT_PED_WEAPON(ped, &cur, 0, 0, 0);
-				DWORD now = GetTickCount();
-				if (cur != weaponCandidateHash) { weaponCandidateHash = cur; weaponCandidateSinceMs = now; }
-				// wait 1 second to let HUD/ammo settle
-				bool stable = (now - weaponCandidateSinceMs >= 1000);
-				if (stable && got && cur != lastWeaponHash && (now - lastWeaponAnnounceMs > 1000))
-				{
-					Hash unarmed = GAMEPLAY::GET_HASH_KEY("WEAPON_UNARMED");
-					if (cur && WEAPON::IS_WEAPON_VALID(cur) && cur != unarmed && WEAPON::HAS_PED_GOT_WEAPON(ped, cur, 0, 0))
-					{
-						std::string uname;
-						for each (auto info in weaponInfos)
-						{
-							Hash wh = GAMEPLAY::GET_HASH_KEY(const_cast<char *>(("WEAPON_" + info.name).c_str()));
-							if (wh == cur) { uname = info.uiname; break; }
-						}
-						wchar_t wname[96]; wname[0] = L'\0';
-						if (!uname.empty()) { size_t n = uname.size(); if (n > 95) n = 95; size_t cv = 0; mbstowcs_s(&cv, wname, 96, uname.c_str(), n); wname[n] = L'\0'; }
-						if (wname[0]) A11y::speak(wname, true);
-						else A11y::speak(L"weapon", true);
-					}
-					else
-					{
-						A11y::speak(L"unarmed", true);
-					}
-					lastWeaponHash = cur;
-					lastWeaponAnnounceMs = now;
-				}
-			}
-			// Preferred target selection (aimed entity, melee target, camera ray, headtracked ped, closest ped)
-			auto selectPreferredTarget = [&]() -> Entity {
-				Player pl = PLAYER::PLAYER_ID();
-				Ped mePed = PLAYER::PLAYER_PED_ID();
-				Ped mount = 0; if (PED::IS_PED_ON_MOUNT(mePed)) { mount = PED::GET_MOUNT(mePed); }
-				Entity t = 0;
-				if (PLAYER::GET_ENTITY_PLAYER_IS_FREE_AIMING_AT(pl, &t) && ENTITY::DOES_ENTITY_EXIST(t)) return t;
-				// Melee target
-				if (PED::IS_PED_IN_MELEE_COMBAT(mePed)) {
-					Ped m = PED::GET_MELEE_TARGET_FOR_PED(mePed);
-					if (m && ENTITY::DOES_ENTITY_EXIST(m) && !ENTITY::IS_ENTITY_DEAD(m) && m != mePed && m != mount) return m;
-				}
-				// Camera raycast fallback aligned with where you look, distance scales with zoom/weapon; use a capsule for wider coverage
-				{
-					Vector3 camPos = CAM::GET_GAMEPLAY_CAM_COORD();
-					Vector3 camRot = CAM::GET_GAMEPLAY_CAM_ROT(2);
-					float radX = camRot.x * static_cast<float>(3.14159265358979323846 / 180.0);
-					float radZ = camRot.z * static_cast<float>(3.14159265358979323846 / 180.0);
-					Vector3 dir = { -sinf(radZ) * cosf(radX), cosf(radZ) * cosf(radX), sinf(radX) };
-					float fov = CAM::GET_GAMEPLAY_CAM_FOV();
-					float zoomFactor = (fov > 0.0f) ? (70.0f / fov) : 1.0f; if (zoomFactor < 0.6f) zoomFactor = 0.6f; if (zoomFactor > 2.5f) zoomFactor = 2.5f;
-					float baseDist = 45.0f * zoomFactor;
-					// Extend for rifles/snipers a bit more, shorten for melee/throwable
-					float dist = baseDist;
-					Hash curW = 0; if (WEAPON::GET_CURRENT_PED_WEAPON(mePed, &curW, 0, 0, 0) && WEAPON::IS_WEAPON_VALID(curW)) {
-						// crude categories by name
-						char wname[64]; wname[0] = '\0';
-						for each (auto info in weaponInfos) { Hash wh = GAMEPLAY::GET_HASH_KEY(const_cast<char *>(("WEAPON_" + info.name).c_str())); if (wh == curW) { strncpy_s(wname, info.name.c_str(), _TRUNCATE); break; } }
-						std::string n = wname; for (auto &c : n) c = (char)tolower(c);
-						if (n.find("sniper") != std::string::npos || n.find("rollingblock") != std::string::npos || n.find("carbine") != std::string::npos || n.find("repeater") != std::string::npos || n.find("rifle") != std::string::npos) dist = baseDist * 1.6f;
-						else if (n.find("bow") != std::string::npos || n.find("lasso") != std::string::npos || n.find("thrown") != std::string::npos) dist = baseDist * 0.8f;
-					}
-					Vector3 to = { camPos.x + dir.x * dist, camPos.y + dir.y * dist, camPos.z + dir.z * dist };
-					Entity ignore = mount ? mount : (Entity)mePed; // ignore mount when on horseback, else self
-					if (camRayHandle == 0) {
-						float radius = 0.25f * (zoomFactor > 1.0f ? (2.0f/zoomFactor) : 1.0f); if (radius < 0.15f) radius = 0.15f; if (radius > 0.4f) radius = 0.4f;
-						camRayHandle = SHAPETEST::START_SHAPE_TEST_CAPSULE(camPos.x, camPos.y, camPos.z, to.x, to.y, to.z, radius, 511, ignore, 7);
-						camRayLastIgnore = ignore;
-					}
-					BOOL hit = FALSE; Entity hitEnt = 0; int state = SHAPETEST::GET_SHAPE_TEST_RESULT(camRayHandle, &hit, &camRayEnd, &camRayNorm, &hitEnt);
-					if (state) {
-						camRayHandle = 0; // completed
-						if (hit && ENTITY::DOES_ENTITY_EXIST(hitEnt) && hitEnt != ignore && hitEnt != mePed && hitEnt != mount) return hitEnt;
-					}
-				}
-				// Headtracking ped among nearby (in front of camera)
-				{
-					int packed[33] = { 32 };
-					int count = PED::GET_PED_NEARBY_PEDS(mePed, packed, -1, 0);
-					if (count > 0) {
-						int lim = packed[0]; if (lim > 32) lim = 32;
-						Vector3 camPos = CAM::GET_GAMEPLAY_CAM_COORD();
-						Vector3 camRot = CAM::GET_GAMEPLAY_CAM_ROT(2);
-						float radX = camRot.x * static_cast<float>(3.14159265358979323846 / 180.0);
-						float radZ = camRot.z * static_cast<float>(3.14159265358979323846 / 180.0);
-						Vector3 dir = { -sinf(radZ) * cosf(radX), cosf(radZ) * cosf(radX), sinf(radX) };
-						for (int i = 1; i <= lim; ++i) {
-							Ped p = (Ped)packed[i];
-							if (!p || p == mePed || p == mount) continue;
-							if (!ENTITY::DOES_ENTITY_EXIST(p) || ENTITY::IS_ENTITY_DEAD(p) || PED::IS_PED_A_PLAYER(p)) continue;
-							Vector3 pc = ENTITY::GET_ENTITY_COORDS(p, TRUE, FALSE);
-							Vector3 v = { pc.x - camPos.x, pc.y - camPos.y, pc.z - camPos.z };
-							float len = sqrtf(v.x*v.x + v.y*v.y + v.z*v.z); if (len <= 0.001f) continue;
-							float dot = (v.x*dir.x + v.y*dir.y + v.z*dir.z) / len; // dir is unit-ish
-							if (dot > 0.2f && PED::IS_PED_HEADTRACKING_PED(mePed, p)) return p;
-						}
-					}
-				}
-				// Closest ped within a small radius (exclude mount; prefer in front)
-				{
-					Vector3 me = ENTITY::GET_ENTITY_COORDS(mePed, TRUE, FALSE);
-					Ped out = 0;
-					float radius = PED::IS_PED_ON_MOUNT(mePed) ? 1.9f : 2.6f;
-					if (PED::GET_CLOSEST_PED(me.x, me.y, me.z, radius, TRUE, TRUE, &out, FALSE, FALSE, 0, 0)) {
-						if (out && ENTITY::DOES_ENTITY_EXIST(out) && !ENTITY::IS_ENTITY_DEAD(out) && out != mePed && out != mount) {
-							// ensure roughly in front of camera
-							Vector3 camPos = CAM::GET_GAMEPLAY_CAM_COORD();
-							Vector3 camRot = CAM::GET_GAMEPLAY_CAM_ROT(2);
-							float radX = camRot.x * static_cast<float>(3.14159265358979323846 / 180.0);
-							float radZ = camRot.z * static_cast<float>(3.14159265358979323846 / 180.0);
-							Vector3 dir = { -sinf(radZ) * cosf(radX), cosf(radZ) * cosf(radX), sinf(radX) };
-							Vector3 pc = ENTITY::GET_ENTITY_COORDS(out, TRUE, FALSE);
-							Vector3 v = { pc.x - camPos.x, pc.y - camPos.y, pc.z - camPos.z };
-							float len = sqrtf(v.x*v.x + v.y*v.y + v.z*v.z);
-							float dot = (len > 0.001f) ? ((v.x*dir.x + v.y*dir.y + v.z*dir.z) / len) : 0.0f;
-							if (dot > 0.1f) return out;
-						}
-					}
-				}
-				return 0;
-			};
-
-			// Speak about the selected target when relevant
-			{
-				bool isAimingOrTargeting = PLAYER::IS_PLAYER_FREE_AIMING(player) || PLAYER::IS_PLAYER_TARGETTING_ANYTHING(player) || PED::IS_PED_IN_MELEE_COMBAT(PLAYER::PLAYER_PED_ID());
-				Entity target = isAimingOrTargeting ? selectPreferredTarget() : 0;
-				if (target && ENTITY::DOES_ENTITY_EXIST(target))
-				{
-					// If aiming at a ped, check if crosshair aligns with the head bone
-					if (ENTITY::IS_ENTITY_A_PED(target) && !ENTITY::IS_ENTITY_DEAD(target))
-					{
-						// Resolve head bone index (try common names)
-						int headIdx = -1;
-						if (headIdx < 0) headIdx = ENTITY::GET_ENTITY_BONE_INDEX_BY_NAME(target, const_cast<char*>("SKEL_Head"));
-						if (headIdx < 0) headIdx = ENTITY::GET_ENTITY_BONE_INDEX_BY_NAME(target, const_cast<char*>("HEAD"));
-						if (headIdx >= 0)
-						{
-							Vector3 headPos = ENTITY::GET_WORLD_POSITION_OF_ENTITY_BONE(target, headIdx);
-							Vector3 camPos = CAM::GET_GAMEPLAY_CAM_COORD();
-							Vector3 camRot = CAM::GET_GAMEPLAY_CAM_ROT(2);
-							float radX = camRot.x * static_cast<float>(3.14159265358979323846 / 180.0);
-							float radZ = camRot.z * static_cast<float>(3.14159265358979323846 / 180.0);
-							Vector3 dir = { -sinf(radZ) * cosf(radX), cosf(radZ) * cosf(radX), sinf(radX) };
-							// Normalize dir
-							float dlen = sqrtf(dir.x*dir.x + dir.y*dir.y + dir.z*dir.z);
-							if (dlen > 0.0001f) { dir.x/=dlen; dir.y/=dlen; dir.z/=dlen; }
-							// Vector from cam to head
-							Vector3 w = { headPos.x - camPos.x, headPos.y - camPos.y, headPos.z - camPos.z };
-							float proj = w.x*dir.x + w.y*dir.y + w.z*dir.z; // along-ray distance
-							if (proj > 0.0f)
-							{
-								// Perpendicular distance to ray = |w x dir|
-								Vector3 cross = { w.y*dir.z - w.z*dir.y, w.z*dir.x - w.x*dir.z, w.x*dir.y - w.y*dir.x };
-								float dist = sqrtf(cross.x*cross.x + cross.y*cross.y + cross.z*cross.z);
-								// Threshold ~22cm feels like head-width tolerance
-								if (dist < 0.22f)
-								{
-									DWORD now = GetTickCount();
-									if (target != g_lastHeadEntity || (now - g_lastHeadCueMs) > 220)
-									{
-										// Optional distinct cue; keep it short
-										BeepAsync(1450, 28);
-										A11y::speak(L"head", true);
-										g_lastHeadEntity = target;
-										g_lastHeadCueMs = now;
-									}
-								}
-							}
-						}
-					}
-
-					// GTA11Y-like short ping for target class (ped/vehicle/prop)
-					if (g_enableAimingWavCues)
-					{
-						DWORD now = GetTickCount();
-						if (now - g_lastAimSoundMs > 180 || target != g_lastAimSoundEntity)
-						{
-							wchar_t wavPath[MAX_PATH]; wavPath[0] = L'\0';
-							// WAVs are next to NativeTrainer.asi in release/bin; try local relative names first
-							if (ENTITY::IS_ENTITY_A_PED(target) && !ENTITY::IS_ENTITY_DEAD(target))
-								wcsncpy_s(wavPath, L"tped.wav", _TRUNCATE);
-							else if (ENTITY::IS_ENTITY_A_VEHICLE(target) && !ENTITY::IS_ENTITY_DEAD(target))
-								wcsncpy_s(wavPath, L"tvehicle.wav", _TRUNCATE);
-							else {
-								// type 3 == object/prop; filter roughly by can-be-damaged
-								int t = ENTITY::GET_ENTITY_TYPE(target);
-								if (t == 3) wcsncpy_s(wavPath, L"tprop.wav", _TRUNCATE);
-							}
-							if (wavPath[0]) PlayWavAsync(wavPath);
-							g_lastAimSoundMs = now; g_lastAimSoundEntity = target;
-						}
-					}
-
-					// Distance and health
-					Vector3 me = ENTITY::GET_ENTITY_COORDS(PLAYER::PLAYER_PED_ID(), TRUE, FALSE);
-					Vector3 tc = ENTITY::GET_ENTITY_COORDS(target, TRUE, FALSE);
-					int distM = static_cast<int>(GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(me.x, me.y, me.z, tc.x, tc.y, tc.z, TRUE) + 0.5f);
-					int hp = ENTITY::IS_ENTITY_DEAD(target) ? 0 : ENTITY::GET_ENTITY_HEALTH(target);
-					int maxHp = 0;
-					if (ENTITY::IS_ENTITY_A_PED(target)) maxHp = PED::GET_PED_MAX_HEALTH(target);
-					else maxHp = ENTITY::GET_ENTITY_MAX_HEALTH(target, FALSE);
-					if (maxHp <= 0) maxHp = 1;
-					if (hp > maxHp) hp = maxHp;
-					int hpPct = static_cast<int>((hp * 100.0f) / static_cast<float>(maxHp) + 0.5f);
-					if (hpPct < 0) hpPct = 0; if (hpPct > 100) hpPct = 100;
-					bool isNew = (target != lastAimedEntity);
-					bool changed = (distM != lastAimedDistM) || (hpPct != lastAimedHealthPct);
-					if (isNew || changed)
-					{
-						std::string name;
-						if (ENTITY::IS_ENTITY_A_PED(target))
-						{
-							Hash model = ENTITY::GET_ENTITY_MODEL(target);
-							for each (auto &info in pedModelInfos)
-							{
-								if (GAMEPLAY::GET_HASH_KEY(const_cast<char*>(info.model.c_str())) == model) { name = info.name; break; }
-							}
-							if (name.empty()) name = "ped";
-							// Update money source attribution
-							lastTargetPedForMoney = target; lastTargetPedForMoneyMs = GetTickCount();
-							wchar_t nbuf[128]; nbuf[0] = L'\0';
-							if (!name.empty()) { size_t n = name.size(); if (n > 127) n = 127; size_t cv = 0; mbstowcs_s(&cv, nbuf, 128, name.c_str(), n); nbuf[n] = L'\0'; }
-							wcsncpy_s(lastTargetPedForMoneyName, nbuf, _TRUNCATE);
-						}
-						else if (ENTITY::IS_ENTITY_A_VEHICLE(target))
-						{
-							Hash model = ENTITY::GET_ENTITY_MODEL(target);
-							bool isTrain = VEHICLE::IS_THIS_MODEL_A_TRAIN(model) ? true : false;
-							bool isBoat = VEHICLE::IS_THIS_MODEL_A_BOAT(model) ? true : false;
-							std::string modelName;
-							for each (auto &vm in vehicleModels)
-							{
-								if (GAMEPLAY::GET_HASH_KEY(const_cast<char*>(vm.c_str())) == model) { modelName = vm; break; }
-							}
-							if (isTrain) name = "train"; else if (isBoat) name = "boat"; else name = "vehicle";
-							if (!modelName.empty()) name += ": " + modelName;
-						}
-						else
-						{
-							int t = ENTITY::GET_ENTITY_TYPE(target);
-							if (t == 3)
-							{
-									auto classifyObject = [&](Entity e) -> std::string {
-										Hash m = ENTITY::GET_ENTITY_MODEL(e);
-										Vector3 mn{}, mx{}; GAMEPLAY::GET_MODEL_DIMENSIONS(m, &mn, &mx);
-									float sx = fabsf(mx.x - mn.x), sy = fabsf(mx.y - mn.y), sz = fabsf(mx.z - mn.z);
-									float th = fminf(fabsf(sx), fabsf(sy));
-									if (sz > 3.0f && th < 2.0f) return std::string("tree-like object");
-									if (sz > 1.0f && sz < 3.5f && (sx < 0.35f || sy < 0.35f)) return std::string("door-like object");
-									if (sz < 1.0f && fmaxf(sx, sy) > 2.0f) return std::string("structure");
-									if (sz >= 0.5f && sz <= 1.6f && sx <= 2.0f && sy <= 2.0f) return std::string("crate-like object");
-									return std::string("object");
-								};
-								name = classifyObject(target);
-							}
-							else
-							{
-								name = "entity";
-							}
-						}
-						wchar_t wbuf[200];
-						wchar_t wname[128]; wname[0] = L'\0';
-						if (!name.empty()) { size_t n = name.size(); if (n > 127) n = 127; size_t cv = 0; mbstowcs_s(&cv, wname, 128, name.c_str(), n); wname[n] = L'\0'; swprintf_s(wbuf, L"aiming at %s, distance %d meters, health %d (%d%%)", wname, distM, hp, hpPct); }
-						else { swprintf_s(wbuf, L"aiming at target, distance %d meters, health %d (%d%%)", distM, hp, hpPct); }
-						if (GetTickCount() - lastAimSpeakMs > 200) { A11y::speak(wbuf, true); lastAimSpeakMs = GetTickCount(); }
-						lastAimedEntity = target;
-						lastAimedDistM = distM;
-						lastAimedHealthPct = hpPct;
-					}
-				}
-				else
-				{
-					lastAimedEntity = 0; lastAimedDistM = -1; lastAimedHealthPct = -1;
-				}
-			}
-
-			// (camera pitch beep removed)
-		}
-<<<<<<< HEAD
-		
-		// Call bodyguard protection system if enabled
-		if (g_protectionEnabled) {
-			Ped playerPed = PLAYER::PLAYER_PED_ID();
-			// Find a bodyguard ped
-			Ped bodyguard = 0;
-			// Look for bodyguards in nearby area
-			int peds[1024];
-			int count = worldGetAllPeds(peds, 1024);
-			for (int i = 0; i < count; i++) {
-				if (ENTITY::DOES_ENTITY_EXIST(peds[i]) && peds[i] != playerPed) {
-					Vector3 playerPos = ENTITY::GET_ENTITY_COORDS(playerPed, true, false);
-					Vector3 pedPos = ENTITY::GET_ENTITY_COORDS(peds[i], true, false);
-					float distance = SYSTEM::VDIST(playerPos.x, playerPos.y, playerPos.z, pedPos.x, pedPos.y, pedPos.z);
-					if (distance < 50.0f && !PED::IS_PED_IN_COMBAT(peds[i], playerPed)) {
-						bodyguard = peds[i];
-						break;
-					}
-				}
-			}
-			if (bodyguard != 0) {
-				BodyguardProtectionSystem(g_protectionEnabled, g_lastProtectionScanMs, bodyguard);
-			}
-		}
-		
-		// === PLAGUE SYSTEM (BlackDeath Mode only) ===
-		
-		// Black Death Mode - NEW LAYOUT: 1: Full Plague, 2: Disease Only, 3: Instant Kill, 4: System Toggle, 6: Targeted Plague, 7: Statistics, 8: Clear Area, 9: Spread Plague, 0: Stop All
-		if (!menuController->HasActiveMenu() && g_a11yMode == A11yMode::BlackDeath) {
-			// NumPad 1: Toggle Full Plague
-			if (IsKeyJustUp(VK_NUMPAD1)) {
-				TogglePlagueSystem(PlagueType::FullPlague);
-			}
-			
-			// NumPad 2: Toggle Disease Only
-			if (IsKeyJustUp(VK_NUMPAD2)) {
-				TogglePlagueSystem(PlagueType::DiseaseOnly);
-			}
-			
-			// NumPad 3: Toggle Instant Kill
-			if (IsKeyJustUp(VK_NUMPAD3)) {
-				TogglePlagueSystem(PlagueType::InstantKill);
-			}
-			
-			// NumPad 4: Toggle entire plague system
-			if (IsKeyJustUp(VK_NUMPAD4)) {
-				g_plagueSystemEnabled = !g_plagueSystemEnabled;
-				if (g_plagueSystemEnabled) {
-					A11y::speak(L"Plague system activated", true);
-				} else {
-					A11y::speak(L"Plague system deactivated", true);
-				}
-			}
-			
-			// NumPad 6: Targeted plague (on aimed entity)
-			if (IsKeyJustUp(VK_NUMPAD6)) {
-				Entity target = 0; Player pl = PLAYER::PLAYER_ID();
-				if (PLAYER::GET_ENTITY_PLAYER_IS_FREE_AIMING_AT(pl, &target) && ENTITY::DOES_ENTITY_EXIST(target) && ENTITY::IS_ENTITY_A_PED(target)) {
-					// Apply targeted plague effect
-					Ped targetPed = (Ped)target;
-					if (!ENTITY::IS_ENTITY_DEAD(targetPed)) {
-						ENTITY::SET_ENTITY_HEALTH(targetPed, 0, FALSE);
-						A11y::speak(L"Target infected", true);
-					} else {
-						A11y::speak(L"Target already dead", true);
-					}
-				} else {
-					A11y::speak(L"No valid target", true);
-				}
-			}
-			
-			// NumPad 7: Plague statistics
-			if (IsKeyJustUp(VK_NUMPAD7)) {
-				wchar_t buf[120]; 
-				swprintf_s(buf, L"Plague system %s, last scan %d seconds ago", 
-					g_plagueSystemEnabled ? L"active" : L"inactive",
-					(GetTickCount() - g_lastPlagueScanMs) / 1000);
-				A11y::speak(buf, true);
-			}
-			
-			// NumPad 8: Clear area of plague effects
-			if (IsKeyJustUp(VK_NUMPAD8)) {
-				// This would clear fire/smoke effects in the area
-				A11y::speak(L"Area cleansed", true);
-			}
-			
-			// NumPad 9: Force plague spread
-			if (IsKeyJustUp(VK_NUMPAD9)) {
-				if (g_plagueSystemEnabled) {
-					g_lastPlagueScanMs = 0; // Force immediate scan
-					A11y::speak(L"Plague spreading", true);
-				} else {
-					A11y::speak(L"Plague system inactive", true);
-				}
-			}
-			
-			// NumPad 0: Stop all plague types
-			if (IsKeyJustUp(VK_NUMPAD0)) {
-				g_plagueSystemEnabled = false;
-				A11y::speak(L"All plague effects stopped", true);
-			}
-		}
-		
-		// Run plague system manager (handles all plague types centrally)
-		PlagueSystemManager(g_lastPlagueScanMs);
-		
-		// Auto-announce location changes (with anti-spam protection)
-		if (g_enableAutoZones) {
-			DWORD now = GetTickCount();
-			// Check for location changes every 1 second to avoid performance impact
-			if (now - g_lastAutoLocationCheckMs > 1000) {
-				g_lastAutoLocationCheckMs = now;
-				
-				wchar_t currentLocation[128] = L"";
-				if (GetCurrentLocationName(currentLocation, 128)) {
-					// Only announce if location has changed and enough time has passed since last announcement
-					if (wcscmp(currentLocation, g_lastZone) != 0 && (now - g_lastZoneSpeakMs) > 3000) {
-						wcscpy_s(g_lastZone, 128, currentLocation);
-						g_lastZoneSpeakMs = now;
-						A11y::speak(currentLocation, true);
-					}
-				}
-			}
-		}
-		
-		// Auto-announce inventory changes
-		if (g_enableInventoryMonitoring) {
-			DWORD now = GetTickCount();
-			// Check for inventory changes every 2 seconds to avoid spam
-			if (now - g_lastInventoryCheckMs > 2000) {
-				g_lastInventoryCheckMs = now;
-				
-				InventoryState currentInventory = ReadCurrentInventory();
-				AnnounceInventoryChanges(g_lastInventory, currentInventory);
-				g_lastInventory = currentInventory;
-			}
-		}
-		
-		// Monitor pickup collection (announces when items are picked up)
-		MonitorPickupCollection();
-=======
-
-		// Riot mode maintenance: periodically make nearby peds fight each other
-		if (g_riotEnabled)
-		{
-			DWORD now = GetTickCount();
-			if (now - g_lastRiotTickMs > 900)
-			{
-				g_lastRiotTickMs = now;
-				Ped me = PLAYER::PLAYER_PED_ID();
-				if (ENTITY::DOES_ENTITY_EXIST(me))
-				{
-					int packed[33] = { 32 };
-					int count = PED::GET_PED_NEARBY_PEDS(me, packed, -1, 0);
-					if (count > 0)
-					{
-						int lim = packed[0]; if (lim > 32) lim = 32;
-						// Collect a small set within 60m
-						Ped list[32]; int n = 0;
-						Vector3 meC = ENTITY::GET_ENTITY_COORDS(me, TRUE, FALSE);
-						for (int i = 1; i <= lim && n < 32; ++i)
-						{
-							Ped p = (Ped)packed[i]; if (!p || p == me) continue;
-							if (!ENTITY::DOES_ENTITY_EXIST(p) || ENTITY::IS_ENTITY_DEAD(p) || PED::IS_PED_A_PLAYER(p)) continue;
-							Vector3 pc = ENTITY::GET_ENTITY_COORDS(p, TRUE, FALSE);
-							float d = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(meC.x, meC.y, meC.z, pc.x, pc.y, pc.z, TRUE);
-							if (d <= 60.0f) list[n++] = p;
-						}
-						if (n >= 2)
-						{
-							for (int i = 0; i < n; ++i)
-							{
-								Ped a = list[i]; if (!a || ENTITY::IS_ENTITY_DEAD(a)) continue;
-								if (!PED::IS_PED_IN_COMBAT(a, 0))
-								{
-									// Pick a random opponent different from 'a'
-									int tries = 6;
-									while (tries-- > 0)
-									{
-										int j = rand() % n; if (j == i) continue; Ped b = list[j];
-										if (!b || ENTITY::IS_ENTITY_DEAD(b)) continue;
-										// Make them aggressive and fight
-										PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(a, TRUE);
-										PED::SET_PED_COMBAT_ABILITY(a, 2);
-										PED::SET_PED_COMBAT_MOVEMENT(a, 2);
-										PED::SET_PED_FLEE_ATTRIBUTES(a, 0, FALSE);
-										AI::TASK_COMBAT_PED(a, b, 0, 0);
-										break;
-									}
-								}
-							}
-						}
->>>>>>> c5a4ce1d4f87f6c1ac8d406db559871b886cf940
-					}
-				}
-			}
-		}
-<<<<<<< HEAD
-=======
-
-	// Guard squads ammo maintenance: keep infinite ammo state consistent
-		if (!g_squads.empty())
-		{
-			for (auto &sq : g_squads)
-			{
-				for (auto &gi : sq.guards)
-				{
-					Ped p = gi.ped; if (!p || !ENTITY::DOES_ENTITY_EXIST(p) || ENTITY::IS_ENTITY_DEAD(p)) continue;
-					if (g_guardsInfiniteAmmo) {
-						WEAPON::SET_PED_INFINITE_AMMO(p, TRUE, 0);
-					}
-		    // No per-clip adjustments for now (stability)
-				}
-			}
-		}
-		
-		// Auto-Defense System: scan for hostile entities and eliminate them
-		ScanAndEliminateHostiles();
->>>>>>> c5a4ce1d4f87f6c1ac8d406db559871b886cf940
 		
 		menuController->Update();
+		
+		// Squad background maintenance (formation, defense, crowd control)
+		SquadFrameMaintenance();
+
+		// Wanted/bounty auto-announcements
+		HandleWantedAnnouncements();
+
+		// Accessibility auto-announcements
+		HandleAutoMoneyAnnounce();
+		HandleAutoHorseStateAnnounce();
+		HandleAutoGuardStatusAnnounce();
+		HandleAutoAnimalBehaviorAnnounce();
+		HandleAutoHonorAnnounce();
+		HandleAutoLootAnnounce();
+
+		// Aiming target announcements
+		HandleAimingAnnounce();
+
+		// Auto-aim system (lock onto nearest hostile)
+		HandleAutoAim();
+
+		// Auto horse whistle/call detection
+		if (g_autoHorseCallAnnounce) {
+			Ped wpp = PLAYER::PLAYER_PED_ID();
+			if (ENTITY::DOES_ENTITY_EXIST(wpp) && !PED::IS_PED_ON_MOUNT(wpp)) {
+				if (!g_horseWhistleActive) {
+					// Detect whistle: try game controls + H key + detect horse approaching
+					bool whistleDetected = IsKeyJustUp(0x48); // H key fallback
+					// Try multiple whistle-related control IDs (varies by context)
+					if (!whistleDetected) whistleDetected = CONTROLS::IS_CONTROL_JUST_PRESSED(0, 0x24978A28);
+					if (!whistleDetected) whistleDetected = CONTROLS::IS_CONTROL_JUST_PRESSED(0, 0xE7EB9185);
+					if (!whistleDetected) whistleDetected = CONTROLS::IS_DISABLED_CONTROL_JUST_PRESSED(0, 0x24978A28);
+					if (!whistleDetected) whistleDetected = CONTROLS::IS_DISABLED_CONTROL_JUST_PRESSED(0, 0xE7EB9185);
+
+					if (whistleDetected) {
+						DebugLog::log("Whistle control or H key detected.");
+					}
+
+					// Also detect by monitoring horse: if horse was far and is now running toward player
+					if (!whistleDetected) {
+						Ped autoHorse = GetPlayerHorse(wpp);
+						if (autoHorse && ENTITY::DOES_ENTITY_EXIST(autoHorse) && !ENTITY::IS_ENTITY_DEAD(autoHorse)) {
+							float horseSpeed = ENTITY::GET_ENTITY_SPEED(autoHorse);
+							if (horseSpeed > 4.0f) { // horse is running/galloping
+								Vector3 pPos = ENTITY::GET_ENTITY_COORDS(wpp, TRUE, FALSE);
+								Vector3 hPos = ENTITY::GET_ENTITY_COORDS(autoHorse, TRUE, FALSE);
+								float dist = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(pPos.x, pPos.y, pPos.z, hPos.x, hPos.y, hPos.z, TRUE);
+								// If horse is running and within whistle range, likely was called
+								if (dist > 10.0f && dist < 250.0f && g_lastHorseAnnouncedDist > 0 && dist < g_lastHorseAnnouncedDist - 2.0f) {
+									whistleDetected = true;
+								}
+								g_lastHorseAnnouncedDist = dist;
+							}
+						}
+					}
+
+					if (whistleDetected) {
+						Ped wHorse = GetPlayerHorse(wpp);
+						if (wHorse && ENTITY::DOES_ENTITY_EXIST(wHorse) && !ENTITY::IS_ENTITY_DEAD(wHorse)) {
+							Vector3 pPos = ENTITY::GET_ENTITY_COORDS(wpp, TRUE, FALSE);
+							Vector3 hPos = ENTITY::GET_ENTITY_COORDS(wHorse, TRUE, FALSE);
+							float dist = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(pPos.x, pPos.y, pPos.z, hPos.x, hPos.y, hPos.z, TRUE);
+							wchar_t buf[200];
+							if (dist > 200.0f)
+								swprintf_s(buf, L"Horse too far! %.0f meters", dist);
+							else if (dist > 80.0f)
+								swprintf_s(buf, L"Horse called. %.0f meters, coming", dist);
+							else if (dist > 20.0f)
+								swprintf_s(buf, L"Horse called. %.0f meters, approaching", dist);
+							else
+								swprintf_s(buf, L"Horse nearby. %.0f meters", dist);
+							A11y::speak(buf, false);
+							g_horseWhistleActive = true;
+							g_horseWhistleStartMs = GetTickCount();
+							g_lastHorseDistAnnounceMs = GetTickCount();
+							g_lastHorseAnnouncedDist = dist;
+							g_whistleTargetHorse = wHorse;
+						}
+					}
+				}
+
+				// Passive horse distance tracking when not actively whistling (update baseline)
+				if (!g_horseWhistleActive) {
+					DWORD now = GetTickCount();
+					if ((now - g_lastHorseDistAnnounceMs) >= 2000) {
+						g_lastHorseDistAnnounceMs = now;
+						Ped pHorse = GetPlayerHorse(wpp);
+						if (pHorse && ENTITY::DOES_ENTITY_EXIST(pHorse) && !ENTITY::IS_ENTITY_DEAD(pHorse)) {
+							Vector3 pPos = ENTITY::GET_ENTITY_COORDS(wpp, TRUE, FALSE);
+							Vector3 hPos = ENTITY::GET_ENTITY_COORDS(pHorse, TRUE, FALSE);
+							g_lastHorseAnnouncedDist = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(pPos.x, pPos.y, pPos.z, hPos.x, hPos.y, hPos.z, TRUE);
+						}
+					}
+				}
+			}
+		}
+
+		// Auto compass direction announcement
+		if (g_autoCompassAnnounce) {
+			DWORD cNow = GetTickCount();
+			if ((cNow - g_lastCompassCheckMs) >= 500) {
+				g_lastCompassCheckMs = cNow;
+				Ped pp = PLAYER::PLAYER_PED_ID();
+				if (ENTITY::DOES_ENTITY_EXIST(pp)) {
+					float heading = ENTITY::GET_ENTITY_HEADING(pp);
+					int dirIdx = GetCompassDirIndex(heading);
+					if (dirIdx != g_lastCompassDir && g_lastCompassDir >= 0) {
+						A11y::speak(GetCompassDirection(heading), false);
+					}
+					g_lastCompassDir = dirIdx;
+				}
+			}
+		}
+
+		// Auto horse whistle detection (H key)
+		{
+			DWORD wNow = GetTickCount();
+			if ((wNow - g_lastWeaponCheckMs) >= 800) {
+				g_lastWeaponCheckMs = wNow;
+				Ped pp = PLAYER::PLAYER_PED_ID();
+				if (ENTITY::DOES_ENTITY_EXIST(pp)) {
+					Hash curWeapon = 0;
+					WEAPON::GET_CURRENT_PED_WEAPON(pp, &curWeapon, TRUE, 0, FALSE);
+					if (g_lastWeaponHash == 0) g_lastWeaponHash = curWeapon; // init
+					if (curWeapon != g_lastWeaponHash) {
+						const wchar_t* name = GetWeaponName(curWeapon);
+						A11y::speak(name, false);
+						g_lastWeaponHash = curWeapon;
+					}
+				}
+			}
+		}
+
+		// Auto mount/dismount + horse proximity announcements
+		{
+			Ped pp = PLAYER::PLAYER_PED_ID();
+			if (ENTITY::DOES_ENTITY_EXIST(pp)) {
+				bool isMounted = PED::IS_PED_ON_MOUNT(pp) ? true : false;
+				
+				// Mount transition: just got on horse
+				if (isMounted && !g_wasPlayerMounted) {
+					Ped horse = PED::GET_MOUNT(pp);
+					if (horse && ENTITY::DOES_ENTITY_EXIST(horse)) {
+						Hash model = ENTITY::GET_ENTITY_MODEL(horse);
+						const wchar_t* hName = GetHorseName(model);
+						int bond = invoke<int>(0x454AD4DA6C41B5BD, horse);
+						if (bond < 0) bond = 0; if (bond > 4) bond = 4;
+						wchar_t buf[200];
+						swprintf_s(buf, L"Mounted %s. Bonding %d", hName, bond);
+						A11y::speak(buf, false);
+						g_lastAnnouncedHorse = horse;
+					}
+					g_wasPlayerMounted = true;
+				}
+				else if (!isMounted && g_wasPlayerMounted) {
+					A11y::speak(L"Dismounted", false);
+					g_wasPlayerMounted = false;
+				}
+				
+				// Track horse arrival after whistle - continuous distance updates
+				if (!isMounted && g_horseWhistleActive && g_whistleTargetHorse) {
+					DWORD elapsed = GetTickCount() - g_horseWhistleStartMs;
+					if (elapsed > 1500) {
+						if (ENTITY::DOES_ENTITY_EXIST(g_whistleTargetHorse) && !ENTITY::IS_ENTITY_DEAD(g_whistleTargetHorse)) {
+							Vector3 pPos = ENTITY::GET_ENTITY_COORDS(pp, TRUE, FALSE);
+							Vector3 hPos = ENTITY::GET_ENTITY_COORDS(g_whistleTargetHorse, TRUE, FALSE);
+							float dist = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(pPos.x, pPos.y, pPos.z, hPos.x, hPos.y, hPos.z, TRUE);
+							if (dist < 5.0f) {
+								A11y::speak(L"Horse arrived", false);
+								g_horseWhistleActive = false;
+								g_whistleTargetHorse = 0;
+							} else {
+								// Announce distance every 3 seconds as horse approaches
+								DWORD now = GetTickCount();
+								if ((now - g_lastHorseDistAnnounceMs) >= 3000) {
+									g_lastHorseDistAnnounceMs = now;
+									wchar_t buf[100];
+									swprintf_s(buf, L"Horse %.0f meters", dist);
+									A11y::speak(buf, false);
+									g_lastHorseAnnouncedDist = dist;
+								}
+							}
+						}
+						if (elapsed > 30000) {
+							A11y::speak(L"Horse whistle timed out", false);
+							g_horseWhistleActive = false;
+							g_whistleTargetHorse = 0;
+						}
+					}
+				}
+			}
+		}
+
 		WAIT(0);
 	}
+	
+	// Cleanup on exit
+	A11y::shutdown();
 }
 
 void ScriptMain()
@@ -4928,91 +5269,3 @@ void ScriptMain()
 	srand(GetTickCount());
 	main();
 }
-
-// Try to read player's honor via known DECORATOR keys; returns true if a value was read
-static bool TryReadHonor(int& outHonor)
-{
-	Ped me = PLAYER::PLAYER_PED_ID();
-	if (!ENTITY::DOES_ENTITY_EXIST(me)) return false;
-	const char* keys[] = { "honor_current", "honor_level", "honor", "player_honor", "honour", "honour_level" };
-	for (auto key : keys) {
-		if (DECORATOR::DECOR_EXIST_ON(me, const_cast<char*>(key))) {
-			outHonor = DECORATOR::DECOR_GET_INT(me, const_cast<char*>(key));
-			return true;
-		}
-	}
-	return false;
-<<<<<<< HEAD
-}	
-=======
-}
-
-// Safely resolve a zone/place label for coordinates without dereferencing invalid pointers.
-// Returns true and fills outW on success.
-static bool TryGetZoneLabelAt(const Vector3& pos, std::wstring& outW)
-{
-	outW.clear();
-	// Try multiple zone modes (territory/state/city etc.)
-	for (int mode = 0; mode <= 7; ++mode)
-	{
-		uintptr_t raw = (uintptr_t)ZONE::_0x43AD8FC02B429D33(pos.x, pos.y, pos.z, mode);
-		if (!raw) continue;
-		// Ensure the returned value points to a readable C-string before use
-		const char* gxt = reinterpret_cast<const char*>(raw);
-		if (IsBadStringPtrA(gxt, 1)) { DebugLog::log("ZONE 0x43AD... mode=%d returned non-string ptr=0x%p", mode, (void*)raw); continue; } // not a valid string pointer; likely a hash/ID
-		if (!*gxt || _stricmp(gxt, "NULL") == 0) continue;
-
-		const char* text = nullptr;
-		// If it's a known GXT label, fetch localized text; otherwise assume it's literal
-		if (UI::DOES_TEXT_LABEL_EXIST(const_cast<char*>(gxt)))
-		{
-			const char* t = UI::_GET_LABEL_TEXT(const_cast<char*>(gxt));
-			if (t && !IsBadStringPtrA(t, 1) && *t) text = t;
-		}
-		else
-		{
-			// Some RDR2 labels are already plain text (e.g., "Valentine"); use as-is
-			text = gxt;
-		}
-
-		if (text && !IsBadStringPtrA(text, 1) && *text)
-		{
-			// Convert to wide
-			size_t n = strlen(text); if (n > 255) n = 255;
-			wchar_t wbuf[260]; size_t cv = 0; mbstowcs_s(&cv, wbuf, 260, text, n);
-			if (wbuf[0]) { DebugLog::log("ZONE 0x43AD... mode=%d gxt='%s' text='%s'", mode, gxt, text); outW.assign(wbuf); return true; }
-		}
-	}
-
-	// Fallback: alternate ZONE native sometimes yields the town/region label
-	{
-		uintptr_t raw = (uintptr_t)ZONE::_0x5BA7A68A346A5A91(pos.x, pos.y, pos.z);
-		if (raw) {
-			const char* gxt = reinterpret_cast<const char*>(raw);
-			if (!IsBadStringPtrA(gxt, 1) && *gxt && _stricmp(gxt, "NULL") != 0) {
-				const char* text = nullptr;
-				if (UI::DOES_TEXT_LABEL_EXIST(const_cast<char*>(gxt))) {
-					const char* t = UI::_GET_LABEL_TEXT(const_cast<char*>(gxt));
-					if (t && !IsBadStringPtrA(t, 1) && *t) text = t;
-				} else {
-					text = gxt; // assume literal
-				}
-				if (text && !IsBadStringPtrA(text, 1) && *text) {
-					size_t n = strlen(text); if (n > 255) n = 255;
-					wchar_t wbuf[260]; size_t cv = 0; mbstowcs_s(&cv, wbuf, 260, text, n);
-					if (wbuf[0]) { DebugLog::log("ZONE 0x5BA7... gxt='%s' text='%s'", gxt, text); outW.assign(wbuf); return true; }
-				} else {
-					DebugLog::log("ZONE 0x5BA7... returned string ptr but not resolved");
-				}
-			} else {
-				DebugLog::log("ZONE 0x5BA7... returned non-string ptr=0x%p", (void*)raw);
-			}
-		}
-	}
-
-	DebugLog::log("Zone label not found at (%.2f, %.2f, %.2f)", pos.x, pos.y, pos.z);
-	return false;
-}
-
-// (moved Guard/Squad data structures near top of file)
->>>>>>> c5a4ce1d4f87f6c1ac8d406db559871b886cf940
