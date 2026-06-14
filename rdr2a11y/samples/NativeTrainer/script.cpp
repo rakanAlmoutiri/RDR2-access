@@ -352,6 +352,9 @@ class MenuItemPlayerTeleport : public MenuItemDefault
 
 			STREAMING::REQUEST_COLLISION_AT_COORD(m_pos.x, m_pos.y, m_pos.z);
 			ENTITY::SET_ENTITY_COORDS(targetEnt, m_pos.x, m_pos.y, m_pos.z, 0, 0, 1, FALSE);
+			if (targetEnt != playerPed) {
+				ENTITY::SET_ENTITY_COORDS(playerPed, m_pos.x, m_pos.y, m_pos.z, 0, 0, 1, FALSE);
+			}
 
 			if (m_heading != -1.0f) {
 				ENTITY::SET_ENTITY_HEADING(targetEnt, m_heading);
@@ -3986,8 +3989,8 @@ static void HandleNavigationHotkeys() {
 			A11y::speak(L"Navigation stopped", true);
 			DebugLog::log("Navigation stopped manually.");
 			
-			// Clear GPS waypoint
-			invoke<Void>(0x08FDC6F796E350D1); // CLEAR_GPS_PLAYER_WAYPOINT
+			// Clear GPS waypoint (Disabled: may cause crashes depending on build)
+			// invoke<Void>(0x08FDC6F796E350D1); // CLEAR_GPS_PLAYER_WAYPOINT
 			return;
 		}
 
@@ -4024,8 +4027,8 @@ static void HandleNavigationHotkeys() {
 			return;
 		}
 
-		// Set GPS waypoint
-		invoke<Void>(0xFE43368D2AA4F2FC, tx, ty); // SET_GPS_PLAYER_WAYPOINT
+		// Set GPS waypoint (Disabled: 0xFE43368D2AA4F2FC does not exist in RDR2 and crashes game)
+		// invoke<Void>(0xFE43368D2AA4F2FC, tx, ty); // SET_GPS_PLAYER_WAYPOINT
 
 		// Reset stuck detection
 		g_lastStuckCheckMs = GetTickCount();
@@ -5059,8 +5062,8 @@ void main()
 					g_autoWalkActive = false;
 					g_navToTargetActive = false;
 
-					// Clear GPS waypoint
-					invoke<Void>(0x08FDC6F796E350D1); // CLEAR_GPS_PLAYER_WAYPOINT
+					// Clear GPS waypoint (Disabled: may cause crashes depending on build)
+					// invoke<Void>(0x08FDC6F796E350D1); // CLEAR_GPS_PLAYER_WAYPOINT
 
 					wchar_t buf[256];
 					swprintf_s(buf, L"Arrived at %s", g_navTargetName);
@@ -5122,8 +5125,8 @@ void main()
 							g_navToTargetActive = false;
 							g_stuckAccumulatorSecs = 0;
 							
-							// Clear GPS waypoint
-							invoke<Void>(0x08FDC6F796E350D1); // CLEAR_GPS_PLAYER_WAYPOINT
+							// Clear GPS waypoint (Disabled: may cause crashes depending on build)
+							// invoke<Void>(0x08FDC6F796E350D1); // CLEAR_GPS_PLAYER_WAYPOINT
 						}
 					}
 				}
