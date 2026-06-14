@@ -285,35 +285,83 @@ class MenuItemPlayerTeleport : public MenuItemDefault
 	virtual void OnSelect()
 	{
 		Entity playerPed = PLAYER::PLAYER_PED_ID();
-		Entity targetEnt = playerPed;
 		bool mounted = PED::IS_PED_ON_MOUNT(playerPed);
 		Entity horse = mounted ? PED::GET_MOUNT(playerPed) : 0;
 		Entity veh = (!mounted && PED::IS_PED_IN_ANY_VEHICLE(playerPed, FALSE)) ? PED::GET_VEHICLE_PED_IS_USING(playerPed) : 0;
 
-		if (mounted) {
-			targetEnt = horse;
-		} else if (veh) {
-			targetEnt = veh;
-		}
+		// Determine if this is a stable or a normal indoor shop
+		bool isStable = (GetCaption().find("STABLE") != std::string::npos);
+		bool shouldDismount = m_isIndoor && !isStable;
 
-		// Clear velocity before teleporting to prevent sliding or flinging
-		ENTITY::SET_ENTITY_VELOCITY(playerPed, 0.0f, 0.0f, 0.0f);
-		ENTITY::SET_ENTITY_VELOCITY(targetEnt, 0.0f, 0.0f, 0.0f);
+		if (shouldDismount && (mounted || veh)) {
+			// Dismount player instantly
+			AI::CLEAR_PED_TASKS_IMMEDIATELY(playerPed, TRUE, TRUE);
+			
+			// Clear player velocity
+			ENTITY::SET_ENTITY_VELOCITY(playerPed, 0.0f, 0.0f, 0.0f);
 
-		// Teleport entity to exact coordinates (no ground check)
-		STREAMING::REQUEST_COLLISION_AT_COORD(m_pos.x, m_pos.y, m_pos.z);
-		ENTITY::SET_ENTITY_COORDS(targetEnt, m_pos.x, m_pos.y, m_pos.z, 0, 0, 1, FALSE);
+			// Teleport player inside
+			STREAMING::REQUEST_COLLISION_AT_COORD(m_pos.x, m_pos.y, m_pos.z);
+			ENTITY::SET_ENTITY_COORDS(playerPed, m_pos.x, m_pos.y, m_pos.z, 0, 0, 1, FALSE);
 
-		// Apply heading alignment if specified
-		if (m_heading != -1.0f) {
-			ENTITY::SET_ENTITY_HEADING(targetEnt, m_heading);
-			if (targetEnt != playerPed) {
+			// Apply heading to player ped
+			if (m_heading != -1.0f) {
 				ENTITY::SET_ENTITY_HEADING(playerPed, m_heading);
+				CAM::SET_GAMEPLAY_CAM_RELATIVE_HEADING(0.0f, 1.0f);
 			}
-			CAM::SET_GAMEPLAY_CAM_RELATIVE_HEADING(0.0f, 1.0f);
-		}
 
-		DebugLog::log("Instant Teleport: Warped entity to (%f, %f, %f) heading %f", m_pos.x, m_pos.y, m_pos.z, m_heading);
+			// Find nearest road for the horse/vehicle to prevent spawning in walls
+			Entity transport = mounted ? horse : veh;
+			if (transport) {
+				if (mounted) {
+					AI::CLEAR_PED_TASKS_IMMEDIATELY(transport, TRUE, TRUE);
+				}
+				ENTITY::SET_ENTITY_VELOCITY(transport, 0.0f, 0.0f, 0.0f);
+				
+				Vector3 roadPos = { 0.0f, 0.0f, 0.0f };
+				float roadHeading = 0.0f;
+				if (PATHFIND::GET_CLOSEST_VEHICLE_NODE_WITH_HEADING(m_pos.x, m_pos.y, m_pos.z, &roadPos, &roadHeading, 1, 3.0f, 0)) {
+					STREAMING::REQUEST_COLLISION_AT_COORD(roadPos.x, roadPos.y, roadPos.z);
+					ENTITY::SET_ENTITY_COORDS(transport, roadPos.x, roadPos.y, roadPos.z, 0, 0, 1, FALSE);
+					ENTITY::SET_ENTITY_HEADING(transport, roadHeading);
+				} else if (PATHFIND::GET_CLOSEST_VEHICLE_NODE(m_pos.x, m_pos.y, m_pos.z, &roadPos, 1, 3.0f, 0)) {
+					STREAMING::REQUEST_COLLISION_AT_COORD(roadPos.x, roadPos.y, roadPos.z);
+					ENTITY::SET_ENTITY_COORDS(transport, roadPos.x, roadPos.y, roadPos.z, 0, 0, 1, FALSE);
+					ENTITY::SET_ENTITY_HEADING(transport, m_heading);
+				} else {
+					// Fallback: offset slightly
+					float ox = m_pos.x + 3.0f;
+					float oy = m_pos.y + 3.0f;
+					STREAMING::REQUEST_COLLISION_AT_COORD(ox, oy, m_pos.z);
+					ENTITY::SET_ENTITY_COORDS(transport, ox, oy, m_pos.z, 0, 0, 1, FALSE);
+					ENTITY::SET_ENTITY_HEADING(transport, m_heading);
+				}
+			}
+			DebugLog::log("Indoor Teleport: Warped player inside to (%f, %f, %f), transport to road", m_pos.x, m_pos.y, m_pos.z);
+		} else {
+			// Normal / Stable Teleport: Keep mounted / Keep vehicle
+			Entity targetEnt = playerPed;
+			if (mounted) {
+				targetEnt = horse;
+			} else if (veh) {
+				targetEnt = veh;
+			}
+
+			ENTITY::SET_ENTITY_VELOCITY(playerPed, 0.0f, 0.0f, 0.0f);
+			ENTITY::SET_ENTITY_VELOCITY(targetEnt, 0.0f, 0.0f, 0.0f);
+
+			STREAMING::REQUEST_COLLISION_AT_COORD(m_pos.x, m_pos.y, m_pos.z);
+			ENTITY::SET_ENTITY_COORDS(targetEnt, m_pos.x, m_pos.y, m_pos.z, 0, 0, 1, FALSE);
+
+			if (m_heading != -1.0f) {
+				ENTITY::SET_ENTITY_HEADING(targetEnt, m_heading);
+				if (targetEnt != playerPed) {
+					ENTITY::SET_ENTITY_HEADING(playerPed, m_heading);
+				}
+				CAM::SET_GAMEPLAY_CAM_RELATIVE_HEADING(0.0f, 1.0f);
+			}
+			DebugLog::log("Direct Teleport: Warped entity to (%f, %f, %f) heading %f", m_pos.x, m_pos.y, m_pos.z, m_heading);
+		}
 	}
 public:
 	MenuItemPlayerTeleport(string caption, Vector3 pos, float heading = -1.0f, bool isIndoor = false)
@@ -1668,6 +1716,9 @@ static float g_navTargetX = 0.0f;
 static float g_navTargetY = 0.0f;
 static float g_navTargetZ = 0.0f;
 static wchar_t g_navTargetName[128] = L"";
+static DWORD g_lastStuckCheckMs = 0;
+static Vector3 g_lastStuckPos = { 0.0f, 0.0f, 0.0f };
+static int g_stuckAccumulatorSecs = 0;
 struct NavPOI { float x; float y; float z; const wchar_t* name; const wchar_t* type; };
 static const NavPOI g_navPOIs[] = {
 	// Valentine
@@ -3934,6 +3985,9 @@ static void HandleNavigationHotkeys() {
 			g_navToTargetActive = false;
 			A11y::speak(L"Navigation stopped", true);
 			DebugLog::log("Navigation stopped manually.");
+			
+			// Clear GPS waypoint
+			invoke<Void>(0x08FDC6F796E350D1); // CLEAR_GPS_PLAYER_WAYPOINT
 			return;
 		}
 
@@ -3970,6 +4024,14 @@ static void HandleNavigationHotkeys() {
 			return;
 		}
 
+		// Set GPS waypoint
+		invoke<Void>(0xFE43368D2AA4F2FC, tx, ty); // SET_GPS_PLAYER_WAYPOINT
+
+		// Reset stuck detection
+		g_lastStuckCheckMs = GetTickCount();
+		g_lastStuckPos = pos;
+		g_stuckAccumulatorSecs = 0;
+
 		// Navigate using navmesh (follows roads, avoids cliffs)
 		bool mounted = PED::IS_PED_ON_MOUNT(playerPed);
 		float speed = mounted ? g_navSpeedValues[g_navHorseSpeedLevel] : 1.0f;
@@ -3988,7 +4050,7 @@ static void HandleNavigationHotkeys() {
 				DebugLog::log("Started mounted auto-navigation: horse=%d to %ls (%f, %f, %f), speed=%.2f", horse, targetName, tx, ty, tz, speed);
 			}
 		} else {
-			AI::TASK_FOLLOW_NAV_MESH_TO_COORD(playerPed, tx, ty, tz, speed, -1, 5.0f, TRUE, 0.0f);
+			AI::TASK_GO_TO_COORD_ANY_MEANS(playerPed, tx, ty, tz, speed, 0, FALSE, 0, 0.0f);
 			DebugLog::log("Started on-foot auto-navigation: player to %ls (%f, %f, %f), speed=%.2f", targetName, tx, ty, tz, speed);
 		}
 
@@ -4522,19 +4584,19 @@ static MonitoredItem g_monitoredItems[] = {
 	{ "WEAPON_FIREBOTTLE", 0, L"Fire Bottle" },
 
 	// Valuables
-	{ "VALUABLE_GOLD_RING", 0, L"Gold Ring" },
-	{ "VALUABLE_SILVER_RING", 0, L"Silver Ring" },
-	{ "VALUABLE_PLATINUM_RING", 0, L"Platinum Ring" },
-	{ "VALUABLE_GOLD_WATCH", 0, L"Gold Watch" },
-	{ "VALUABLE_SILVER_WATCH", 0, L"Silver Watch" },
-	{ "VALUABLE_PLATINUM_WATCH", 0, L"Platinum Watch" },
-	{ "VALUABLE_GOLD_TOOTH", 0, L"Gold Tooth" },
-	{ "VALUABLE_GOLD_BAR", 0, L"Gold Bar" },
-	{ "VALUABLE_GOLD_NUGGET", 0, L"Gold Nugget" },
-	{ "VALUABLE_SILVER_BUCKLE", 0, L"Silver Buckle" },
-	{ "VALUABLE_GOLD_BUCKLE", 0, L"Gold Buckle" },
-	{ "VALUABLE_JEWELRY_LARGE", 0, L"Large Jewelry" },
-	{ "VALUABLE_JEWELRY_SMALL", 0, L"Small Jewelry" },
+	{ "KIT_GOLD_RING", 0, L"Gold Ring" },
+	{ "KIT_SILVER_RING", 0, L"Silver Ring" },
+	{ "KIT_PLATINUM_RING", 0, L"Platinum Ring" },
+	{ "KIT_GOLD_POCKET_WATCH", 0, L"Gold Watch" },
+	{ "KIT_SILVER_POCKET_WATCH", 0, L"Silver Watch" },
+	{ "KIT_PLATINUM_POCKET_WATCH", 0, L"Platinum Watch" },
+	{ "KIT_GOLD_TOOTH", 0, L"Gold Tooth" },
+	{ "KIT_GOLD_BAR", 0, L"Gold Bar" },
+	{ "PROVISION_GOLD_NUGGET", 0, L"Gold Nugget" },
+	{ "KIT_SILVER_BUCKLE", 0, L"Silver Buckle" },
+	{ "KIT_GOLD_BUCKLE", 0, L"Gold Buckle" },
+	{ "KIT_JEWELRY_LARGE", 0, L"Large Jewelry" },
+	{ "KIT_JEWELRY_SMALL", 0, L"Small Jewelry" },
 
 	// Provisions: Tobacco/Cigars
 	{ "PROVISION_CIGAR", 0, L"Cigar" },
@@ -4690,8 +4752,8 @@ static void HandleAutoLootAnnounce() {
 			}
 		}
 
-		// Stop checking after exactly 7.5 seconds (7500 ms)
-		if (now - g_lootCheckMs >= 7500) {
+		// Stop checking after exactly 10.0 seconds (10000 ms)
+		if (now - g_lootCheckMs >= 10000) {
 			g_isLootingCorpse = false;
 			Ped completedPed = g_lootedPed;
 			g_lootedPed = 0;
@@ -4977,7 +5039,7 @@ void main()
 		// Monitor auto-navigation target arrival
 		if (g_autoWalkActive && g_navToTargetActive) {
 			Ped pp = PLAYER::PLAYER_PED_ID();
-			if (ENTITY::DOES_ENTITY_EXIST(pp)) {
+			if (ENTITY::DOES_ENTITY_EXIST(pp) && !ENTITY::IS_ENTITY_DEAD(pp)) {
 				Vector3 pos = ENTITY::GET_ENTITY_COORDS(pp, TRUE, FALSE);
 				float dist = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(pos.x, pos.y, pos.z, g_navTargetX, g_navTargetY, g_navTargetZ, TRUE);
 				if (dist < 8.0f) {
@@ -4997,10 +5059,73 @@ void main()
 					g_autoWalkActive = false;
 					g_navToTargetActive = false;
 
+					// Clear GPS waypoint
+					invoke<Void>(0x08FDC6F796E350D1); // CLEAR_GPS_PLAYER_WAYPOINT
+
 					wchar_t buf[256];
 					swprintf_s(buf, L"Arrived at %s", g_navTargetName);
 					A11y::speak(buf, true);
 					DebugLog::log("Arrived at target: %ls", g_navTargetName);
+				} else {
+					// Stuck detection
+					DWORD now = GetTickCount();
+					if (now - g_lastStuckCheckMs >= 1000) {
+						float distMoved = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(pos.x, pos.y, pos.z, g_lastStuckPos.x, g_lastStuckPos.y, g_lastStuckPos.z, TRUE);
+						if (distMoved < 0.15f) {
+							g_stuckAccumulatorSecs++;
+						} else {
+							g_stuckAccumulatorSecs = 0;
+						}
+						g_lastStuckPos = pos;
+						g_lastStuckCheckMs = now;
+
+						bool mounted = PED::IS_PED_ON_MOUNT(pp);
+						float speed = mounted ? g_navSpeedValues[g_navHorseSpeedLevel] : 1.0f;
+
+						if (g_stuckAccumulatorSecs == 3 || g_stuckAccumulatorSecs == 6) {
+							DebugLog::log("Navigation stuck detector: static for %d seconds. Repathing...", g_stuckAccumulatorSecs);
+							A11y::speak(L"Stuck, repathing...", false);
+							
+							AI::CLEAR_PED_TASKS_IMMEDIATELY(pp, TRUE, TRUE);
+							if (mounted) {
+								Ped horse = PED::GET_MOUNT(pp);
+								if (horse) {
+									AI::CLEAR_PED_TASKS_IMMEDIATELY(horse, TRUE, TRUE);
+									AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(horse, FALSE);
+									AI::SET_PED_PATH_AVOID_FIRE(horse, TRUE);
+									if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(horse, TRUE);
+									AI::TASK_FOLLOW_NAV_MESH_TO_COORD(horse, g_navTargetX, g_navTargetY, g_navTargetZ, speed, -1, 5.0f, TRUE, 0.0f);
+								}
+							} else {
+								AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(pp, FALSE);
+								AI::SET_PED_PATH_AVOID_FIRE(pp, TRUE);
+								if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(pp, TRUE);
+								AI::TASK_GO_TO_COORD_ANY_MEANS(pp, g_navTargetX, g_navTargetY, g_navTargetZ, speed, 0, FALSE, 0, 0.0f);
+							}
+						} else if (g_stuckAccumulatorSecs >= 9) {
+							DebugLog::log("Navigation stuck detector: static for 9 seconds. Stopping navigation.");
+							A11y::speak(L"Navigation stuck, stopping", true);
+							
+							AI::CLEAR_PED_TASKS(pp, TRUE, FALSE);
+							AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(pp, TRUE);
+							if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(pp, FALSE);
+							
+							if (mounted) {
+								Ped horse = PED::GET_MOUNT(pp);
+								if (horse) {
+									AI::CLEAR_PED_TASKS(horse, TRUE, FALSE);
+									AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(horse, TRUE);
+									if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(horse, FALSE);
+								}
+							}
+							g_autoWalkActive = false;
+							g_navToTargetActive = false;
+							g_stuckAccumulatorSecs = 0;
+							
+							// Clear GPS waypoint
+							invoke<Void>(0x08FDC6F796E350D1); // CLEAR_GPS_PLAYER_WAYPOINT
+						}
+					}
 				}
 			}
 		}
