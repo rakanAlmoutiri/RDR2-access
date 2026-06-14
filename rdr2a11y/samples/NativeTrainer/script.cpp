@@ -1718,6 +1718,7 @@ static float g_navTargetX = 0.0f;
 static float g_navTargetY = 0.0f;
 static float g_navTargetZ = 0.0f;
 static wchar_t g_navTargetName[128] = L"";
+static bool g_navTargetIsIndoor = false;
 static DWORD g_lastStuckCheckMs = 0;
 static Vector3 g_lastStuckPos = { 0.0f, 0.0f, 0.0f };
 static int g_stuckAccumulatorSecs = 0;
@@ -3908,8 +3909,18 @@ static void HandleNavigationHotkeys() {
 			else if (AI::IS_PED_WALKING(playerPed)) state = L"Walking";
 			else state = L"Standing";
 		}
-		wchar_t buf[300];
+		wchar_t buf[600];
 		swprintf_s(buf, L"%s, %.0f degrees. %s, %.0f km per hour", compass, compassDeg, state, speedKmh);
+
+		if (g_navToTargetActive) {
+			Vector3 pos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
+			float dist = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(pos.x, pos.y, pos.z, g_navTargetX, g_navTargetY, g_navTargetZ, TRUE);
+			const wchar_t* dir = GetRelativeDirection(heading, pos.x, pos.y, g_navTargetX, g_navTargetY);
+			wchar_t navBuf[256];
+			swprintf_s(navBuf, L". Target %s is %s, %.0f meters", g_navTargetName, dir, dist);
+			wcscat_s(buf, navBuf);
+		}
+
 		A11y::speak(buf, true);
 	}
 
@@ -4014,16 +4025,36 @@ static void HandleNavigationHotkeys() {
 			targetName = g_navPOIs[idx].name;
 		}
 
+		bool isIndoor = false;
+		if (!g_lastBrowsedMission) {
+			int idx = g_navSortedIndices[g_navCurrentPOI];
+			const wchar_t* type = g_navPOIs[idx].type;
+			isIndoor = (wcscmp(type, L"Gunsmith") == 0 ||
+			            wcscmp(type, L"Store") == 0 ||
+			            wcscmp(type, L"Doctor") == 0 ||
+			            wcscmp(type, L"Stable") == 0 ||
+			            wcscmp(type, L"Saloon") == 0 ||
+			            wcscmp(type, L"Hotel") == 0 ||
+			            wcscmp(type, L"Tailor") == 0 ||
+			            wcscmp(type, L"Trapper") == 0 ||
+			            wcscmp(type, L"Post Office") == 0 ||
+			            wcscmp(type, L"Poker") == 0 ||
+			            wcscmp(type, L"Activity") == 0);
+		}
+
 		Vector3 pos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
 		float dist = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(pos.x, pos.y, pos.z, tx, ty, tz, TRUE);
 
-		if (dist < 10.0f) {
-			A11y::speak(L"Already at location", true);
+		bool mounted = PED::IS_PED_ON_MOUNT(playerPed);
+		float minArrivalDist = isIndoor ? (mounted ? 8.0f : 1.8f) : 8.0f;
+		if (dist < minArrivalDist) {
+			if (isIndoor && mounted) {
+				A11y::speak(L"Already outside location. Dismount and walk inside.", true);
+			} else {
+				A11y::speak(L"Already at location", true);
+			}
 			return;
 		}
-
-		// Set GPS waypoint (Disabled: 0xFE43368D2AA4F2FC does not exist in RDR2 and crashes game)
-		// invoke<Void>(0xFE43368D2AA4F2FC, tx, ty); // SET_GPS_PLAYER_WAYPOINT
 
 		// Reset stuck detection
 		g_lastStuckCheckMs = GetTickCount();
@@ -4031,7 +4062,6 @@ static void HandleNavigationHotkeys() {
 		g_stuckAccumulatorSecs = 0;
 
 		// Navigate using navmesh (follows roads, avoids cliffs)
-		bool mounted = PED::IS_PED_ON_MOUNT(playerPed);
 		float speed = mounted ? g_navSpeedValues[g_navHorseSpeedLevel] : 1.0f;
 		
 		AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(playerPed, FALSE);
@@ -4056,6 +4086,7 @@ static void HandleNavigationHotkeys() {
 		g_navTargetY = ty;
 		g_navTargetZ = tz;
 		wcsncpy_s(g_navTargetName, targetName, 127);
+		g_navTargetIsIndoor = isIndoor;
 		g_navToTargetActive = true;
 		g_autoWalkActive = true;
 
@@ -4675,9 +4706,18 @@ static void HandleAutoLootAnnounce() {
 	}
 
 	int invId = invoke<int>(0x13D234A2A3F66E63, playerPed); // _INVENTORY_GET_INVENTORY_ID_FROM_PED
+	static int lastLoggedInvId = -999;
+	if (invId != lastLoggedInvId) {
+		DebugLog::log("Loot Announcer DIAGNOSTIC: invId = %d", invId);
+		if (invId != 0) {
+			int testCount1 = invoke<int>(0xE787F05DFC977BDE, invId, GAMEPLAY::GET_HASH_KEY("AMMO_REVOLVER"), FALSE);
+			int testCount2 = invoke<int>(0xE787F05DFC977BDE, 1, GAMEPLAY::GET_HASH_KEY("AMMO_REVOLVER"), FALSE);
+			DebugLog::log("Loot Announcer DIAGNOSTIC: Revolver Ammo Count (with invId=%d) = %d, (with 1) = %d", invId, testCount1, testCount2);
+		}
+		lastLoggedInvId = invId;
+	}
 	if (invId == 0) {
-		g_inventoryInitialized = false;
-		return;
+		invId = 1; // Fallback to player single player inventory ID
 	}
 
 	// Throttle reads to every 300ms to save performance
@@ -4965,12 +5005,18 @@ void main()
 			if (ENTITY::DOES_ENTITY_EXIST(pp) && !ENTITY::IS_ENTITY_DEAD(pp)) {
 				Vector3 pos = ENTITY::GET_ENTITY_COORDS(pp, TRUE, FALSE);
 				float dist = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(pos.x, pos.y, pos.z, g_navTargetX, g_navTargetY, g_navTargetZ, TRUE);
-				if (dist < 8.0f) {
+				
+				bool mounted = PED::IS_PED_ON_MOUNT(pp);
+				float arrivalThreshold = 8.0f;
+				if (g_navTargetIsIndoor) {
+					arrivalThreshold = mounted ? 8.0f : 1.8f;
+				}
+
+				if (dist < arrivalThreshold) {
 					AI::CLEAR_PED_TASKS(pp, TRUE, FALSE);
 					AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(pp, TRUE);
 					if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(pp, FALSE);
 
-					bool mounted = PED::IS_PED_ON_MOUNT(pp);
 					if (mounted) {
 						Ped horse = PED::GET_MOUNT(pp);
 						if (horse) {
@@ -4986,9 +5032,17 @@ void main()
 					// invoke<Void>(0x08FDC6F796E350D1); // CLEAR_GPS_PLAYER_WAYPOINT
 
 					wchar_t buf[256];
-					swprintf_s(buf, L"Arrived at %s", g_navTargetName);
+					if (g_navTargetIsIndoor) {
+						if (mounted) {
+							swprintf_s(buf, L"Arrived outside %s. Dismount and navigate on foot.", g_navTargetName);
+						} else {
+							swprintf_s(buf, L"Arrived at %s counter.", g_navTargetName);
+						}
+					} else {
+						swprintf_s(buf, L"Arrived at %s", g_navTargetName);
+					}
 					A11y::speak(buf, true);
-					DebugLog::log("Arrived at target: %ls", g_navTargetName);
+					DebugLog::log("Arrived at target: %ls (indoor=%d, mounted=%d)", g_navTargetName, g_navTargetIsIndoor, mounted);
 				} else {
 					// Stuck detection
 					DWORD now = GetTickCount();
