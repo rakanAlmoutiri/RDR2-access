@@ -143,17 +143,6 @@ if exist "%~dp0README_package.txt" (
   )
 )
 
-REM Ensure audio cue wavs are present in package (keep existing ones)
-for %%W in (tped.wav tvehicle.wav tprop.wav) do (
-  if not exist "%PACK_DIR%\%%W" (
-    if exist "%~dp0samples\NativeTrainer\bin\Release\%%W" copy /Y "%~dp0samples\NativeTrainer\bin\Release\%%W" "%PACK_DIR%\%%W" >nul
-  )
-)
-
-REM Also copy wavs next to built NativeTrainer.asi for local testing
-for %%W in (tped.wav tvehicle.wav tprop.wav) do (
-  if exist "%PACK_DIR%\%%W" copy /Y "%PACK_DIR%\%%W" "%~dp0samples\NativeTrainer\bin\Release\%%W" >nul
-)
 
 echo SUCCESS. Output:
 echo   %NT_OUT%
