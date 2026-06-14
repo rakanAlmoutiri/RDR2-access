@@ -290,8 +290,9 @@ class MenuItemPlayerTeleport : public MenuItemDefault
 		Entity veh = (!mounted && PED::IS_PED_IN_ANY_VEHICLE(playerPed, FALSE)) ? PED::GET_VEHICLE_PED_IS_USING(playerPed) : 0;
 
 		// Determine if this is a stable or a normal indoor shop
-		bool isStable = (GetCaption().find("STABLE") != std::string::npos);
-		bool shouldDismount = m_isIndoor && !isStable;
+		// All indoor locations (including stables) will dismount the player and teleport them inside,
+		// parking the horse/vehicle outside on the nearest road to prevent falling through or clipping inside.
+		bool shouldDismount = m_isIndoor;
 
 		if (shouldDismount && (mounted || veh)) {
 			// Dismount player instantly
@@ -302,7 +303,8 @@ class MenuItemPlayerTeleport : public MenuItemDefault
 
 			// Teleport player inside
 			STREAMING::REQUEST_COLLISION_AT_COORD(m_pos.x, m_pos.y, m_pos.z);
-			ENTITY::SET_ENTITY_COORDS(playerPed, m_pos.x, m_pos.y, m_pos.z, 0, 0, 1, FALSE);
+			scriptWait(100); // Allow collision loading
+			ENTITY::SET_ENTITY_COORDS(playerPed, m_pos.x, m_pos.y, m_pos.z + 1.0f, 0, 0, 1, FALSE);
 
 			// Apply heading to player ped
 			if (m_heading != -1.0f) {
@@ -339,7 +341,7 @@ class MenuItemPlayerTeleport : public MenuItemDefault
 			}
 			DebugLog::log("Indoor Teleport: Warped player inside to (%f, %f, %f), transport to road", m_pos.x, m_pos.y, m_pos.z);
 		} else {
-			// Normal / Stable Teleport: Keep mounted / Keep vehicle
+			// Normal / Outdoor Teleport: Keep mounted / Keep vehicle
 			Entity targetEnt = playerPed;
 			if (mounted) {
 				targetEnt = horse;
@@ -348,22 +350,19 @@ class MenuItemPlayerTeleport : public MenuItemDefault
 			}
 
 			ENTITY::SET_ENTITY_VELOCITY(playerPed, 0.0f, 0.0f, 0.0f);
-			ENTITY::SET_ENTITY_VELOCITY(targetEnt, 0.0f, 0.0f, 0.0f);
+			if (targetEnt != playerPed) {
+				ENTITY::SET_ENTITY_VELOCITY(targetEnt, 0.0f, 0.0f, 0.0f);
+			}
 
 			STREAMING::REQUEST_COLLISION_AT_COORD(m_pos.x, m_pos.y, m_pos.z);
-			ENTITY::SET_ENTITY_COORDS(targetEnt, m_pos.x, m_pos.y, m_pos.z, 0, 0, 1, FALSE);
-			if (targetEnt != playerPed) {
-				ENTITY::SET_ENTITY_COORDS(playerPed, m_pos.x, m_pos.y, m_pos.z, 0, 0, 1, FALSE);
-			}
+			scriptWait(100); // Allow collision loading
+			ENTITY::SET_ENTITY_COORDS(targetEnt, m_pos.x, m_pos.y, m_pos.z + 1.0f, 0, 0, 1, FALSE);
 
 			if (m_heading != -1.0f) {
 				ENTITY::SET_ENTITY_HEADING(targetEnt, m_heading);
-				if (targetEnt != playerPed) {
-					ENTITY::SET_ENTITY_HEADING(playerPed, m_heading);
-				}
 				CAM::SET_GAMEPLAY_CAM_RELATIVE_HEADING(0.0f, 1.0f);
 			}
-			DebugLog::log("Direct Teleport: Warped entity to (%f, %f, %f) heading %f", m_pos.x, m_pos.y, m_pos.z, m_heading);
+			DebugLog::log("Direct Teleport: Warped entity %d to (%f, %f, %f) heading %f", targetEnt, m_pos.x, m_pos.y, m_pos.z, m_heading);
 		}
 	}
 public:
@@ -3830,11 +3829,9 @@ static void HandleNavigationHotkeys() {
 					AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(horse, FALSE);
 					AI::SET_PED_PATH_AVOID_FIRE(horse, TRUE);
 					if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(horse, TRUE);
-					AI::TASK_FOLLOW_NAV_MESH_TO_COORD(horse, targetX, targetY, targetZ, speed, -1, 2.0f, TRUE, 0.0f);
 				}
-			} else {
-				AI::TASK_FOLLOW_NAV_MESH_TO_COORD(playerPed, targetX, targetY, targetZ, speed, -1, 2.0f, TRUE, 0.0f);
 			}
+			AI::TASK_FOLLOW_NAV_MESH_TO_COORD(playerPed, targetX, targetY, targetZ, speed, -1, 2.0f, TRUE, 0.0f);
 			g_autoWalkActive = true;
 			g_navToTargetActive = false;
 			A11y::speak(L"Auto walk on", true);
@@ -3880,11 +3877,9 @@ static void HandleNavigationHotkeys() {
 					AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(horse, FALSE);
 					AI::SET_PED_PATH_AVOID_FIRE(horse, TRUE);
 					if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(horse, TRUE);
-					AI::TASK_FOLLOW_NAV_MESH_TO_COORD(horse, targetX, targetY, targetZ, speed, -1, 2.0f, TRUE, 0.0f);
 				}
-			} else {
-				AI::TASK_FOLLOW_NAV_MESH_TO_COORD(playerPed, targetX, targetY, targetZ, speed, -1, 2.0f, TRUE, 0.0f);
 			}
+			AI::TASK_FOLLOW_NAV_MESH_TO_COORD(playerPed, targetX, targetY, targetZ, speed, -1, 2.0f, TRUE, 0.0f);
 			g_autoWalkActive = true;
 			g_navToTargetActive = false;
 			A11y::speak(L"Auto run on", true);
@@ -4049,9 +4044,9 @@ static void HandleNavigationHotkeys() {
 				AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(horse, FALSE);
 				AI::SET_PED_PATH_AVOID_FIRE(horse, TRUE);
 				if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(horse, TRUE);
-				AI::TASK_FOLLOW_NAV_MESH_TO_COORD(horse, tx, ty, tz, speed, -1, 5.0f, TRUE, 0.0f);
-				DebugLog::log("Started mounted auto-navigation: horse=%d to %ls (%f, %f, %f), speed=%.2f", horse, targetName, tx, ty, tz, speed);
 			}
+			AI::TASK_FOLLOW_NAV_MESH_TO_COORD(playerPed, tx, ty, tz, speed, -1, 5.0f, TRUE, 0.0f);
+			DebugLog::log("Started mounted auto-navigation: player on horse=%d to %ls (%f, %f, %f), speed=%.2f", horse, targetName, tx, ty, tz, speed);
 		} else {
 			AI::TASK_GO_TO_COORD_ANY_MEANS(playerPed, tx, ty, tz, speed, 0, FALSE, 0, 0.0f);
 			DebugLog::log("Started on-foot auto-navigation: player to %ls (%f, %f, %f), speed=%.2f", targetName, tx, ty, tz, speed);
@@ -4652,27 +4647,19 @@ static MonitoredItem g_monitoredItems[] = {
 };
 
 static const int g_monitoredItemsCount = sizeof(g_monitoredItems) / sizeof(g_monitoredItems[0]);
-static int g_lootStartCounts[g_monitoredItemsCount] = { 0 };
-static int g_accumulatedDiffs[g_monitoredItemsCount] = { 0 };
+static int g_lastInventoryCounts[g_monitoredItemsCount] = { 0 };
+static bool g_inventoryInitialized = false;
 static bool g_lootHashesInitialized = false;
 
 static void HandleAutoLootAnnounce() {
-	if (!g_autoLootAnnounce) return;
-	DWORD now = GetTickCount();
+	if (!g_autoLootAnnounce) {
+		g_inventoryInitialized = false;
+		return;
+	}
 
 	Ped playerPed = PLAYER::PLAYER_PED_ID();
 	if (!ENTITY::DOES_ENTITY_EXIST(playerPed) || ENTITY::IS_ENTITY_DEAD(playerPed)) {
-		if (g_isLootingCorpse) {
-			g_isLootingCorpse = false;
-			g_lootedPed = 0;
-		}
-		return;
-	}
-	if (PED::IS_PED_ON_MOUNT(playerPed) || PED::IS_PED_IN_ANY_VEHICLE(playerPed, FALSE)) {
-		if (g_isLootingCorpse) {
-			g_isLootingCorpse = false;
-			g_lootedPed = 0;
-		}
+		g_inventoryInitialized = false;
 		return;
 	}
 
@@ -4688,107 +4675,40 @@ static void HandleAutoLootAnnounce() {
 	}
 
 	int invId = invoke<int>(0x13D234A2A3F66E63, playerPed); // _INVENTORY_GET_INVENTORY_ID_FROM_PED
+	if (invId == 0) {
+		g_inventoryInitialized = false;
+		return;
+	}
 
-	if (!g_isLootingCorpse) {
-		static DWORD lastSearchTime = 0;
-		if (now - lastSearchTime < 250) return;
-		lastSearchTime = now;
+	// Throttle reads to every 300ms to save performance
+	static DWORD lastLootCheckTime = 0;
+	DWORD now = GetTickCount();
+	if (now - lastLootCheckTime < 300) return;
+	lastLootCheckTime = now;
 
-		// Find a dead ped within 2.5 meters that is NOT fully looted
-		Vector3 myPos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
-		int peds[1024];
-		int count = worldGetAllPeds(peds, 1024);
-		Ped nearestDeadPed = 0;
-		float nearestDist = 2.5f;
-
-		for (int i = 0; i < count; ++i) {
-			Ped p = (Ped)peds[i];
-			if (!p || p == playerPed) continue;
-			if (!ENTITY::DOES_ENTITY_EXIST(p) || !ENTITY::IS_ENTITY_DEAD(p)) continue;
-
-			// Check if already fully looted
-			BOOL isLooted = invoke<BOOL>(0x8DE41E9902E85756, p); // _IS_ENTITY_FULLY_LOOTED
-			if (isLooted) continue;
-
-			Vector3 tPos = ENTITY::GET_ENTITY_COORDS(p, TRUE, FALSE);
-			float d = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(myPos.x, myPos.y, myPos.z, tPos.x, tPos.y, tPos.z, TRUE);
-			if (d < nearestDist) {
-				nearestDist = d;
-				nearestDeadPed = p;
-			}
-		}
-
-		if (nearestDeadPed) {
-			// Check if player is holding the Loot control (0x41AC83D1 = INPUT_LOOT)
-			bool pressedLoot = CONTROLS::IS_CONTROL_JUST_PRESSED(0, 0x41AC83D1)
-				|| CONTROLS::IS_DISABLED_CONTROL_JUST_PRESSED(0, 0x41AC83D1)
-				|| CONTROLS::IS_CONTROL_PRESSED(0, 0x41AC83D1)
-				|| CONTROLS::IS_DISABLED_CONTROL_PRESSED(0, 0x41AC83D1);
-
-			if (pressedLoot) {
-				g_isLootingCorpse = true;
-				g_lootedPed = nearestDeadPed;
-				g_lootCheckMs = now;
-				A11y::speak(L"Looting body...", false);
-				DebugLog::log("Looting initiated near dead ped %d", nearestDeadPed);
-				DebugLog::log("  Loot Start: Inventory ID = %d", invId);
-
-				// Take baseline snapshot
-				for (int i = 0; i < g_monitoredItemsCount; ++i) {
-					g_lootStartCounts[i] = invoke<int>(0xE787F05DFC977BDE, invId, g_monitoredItems[i].hash, FALSE);
-					g_accumulatedDiffs[i] = 0;
-					if (g_lootStartCounts[i] > 0) {
-						DebugLog::log("    Pre-loot Count: %s = %d", g_monitoredItems[i].codeName, g_lootStartCounts[i]);
-					}
-				}
-			}
-		}
-	} else {
-		// Continuous tracking during the animation
+	if (!g_inventoryInitialized) {
+		// Initialize the baseline inventory snapshot
 		for (int i = 0; i < g_monitoredItemsCount; ++i) {
-			int currentCount = invoke<int>(0xE787F05DFC977BDE, invId, g_monitoredItems[i].hash, FALSE);
-			int diff = currentCount - g_lootStartCounts[i];
-			if (diff > 0) {
-				g_accumulatedDiffs[i] += diff;
-				g_lootStartCounts[i] = currentCount; // Update baseline
-				DebugLog::log("Continuous Loot: Detected %s (+%d), accumulated total: %d", g_monitoredItems[i].codeName, diff, g_accumulatedDiffs[i]);
-			}
+			g_lastInventoryCounts[i] = invoke<int>(0xE787F05DFC977BDE, invId, g_monitoredItems[i].hash, FALSE);
 		}
+		g_inventoryInitialized = true;
+		return;
+	}
 
-		// Stop checking after exactly 10.0 seconds (10000 ms)
-		if (now - g_lootCheckMs >= 10000) {
-			g_isLootingCorpse = false;
-			Ped completedPed = g_lootedPed;
-			g_lootedPed = 0;
-
-			DebugLog::log("Looting complete. Ped %d, elapsed=%lu ms", completedPed, (unsigned long)(now - g_lootCheckMs));
-
-			// Build announcement
-			wchar_t speakBuf[1024] = L"";
-			int itemsFoundCount = 0;
-
-			for (int i = 0; i < g_monitoredItemsCount; ++i) {
-				if (g_accumulatedDiffs[i] > 0) {
-					wchar_t itemText[128];
-					swprintf_s(itemText, L", plus %d %s", g_accumulatedDiffs[i], g_monitoredItems[i].displayName);
-					if (wcslen(speakBuf) + wcslen(itemText) < 1000) {
-						wcscat_s(speakBuf, itemText);
-					}
-					itemsFoundCount++;
-					DebugLog::log("Final Loot Announcement: %s (+%d)", g_monitoredItems[i].codeName, g_accumulatedDiffs[i]);
-				}
-			}
-
-			if (itemsFoundCount > 0) {
-				wchar_t* cleanText = speakBuf;
-				if (wcsncmp(speakBuf, L", ", 2) == 0) {
-					cleanText = speakBuf + 2;
-				}
-				A11y::speak(cleanText, false);
+	for (int i = 0; i < g_monitoredItemsCount; ++i) {
+		int currentCount = invoke<int>(0xE787F05DFC977BDE, invId, g_monitoredItems[i].hash, FALSE);
+		int diff = currentCount - g_lastInventoryCounts[i];
+		if (diff > 0) {
+			wchar_t buf[256];
+			if (diff == 1) {
+				swprintf_s(buf, L"Looted %s", g_monitoredItems[i].displayName);
 			} else {
-				A11y::speak(L"Looted body.", false);
+				swprintf_s(buf, L"Looted %d %s", diff, g_monitoredItems[i].displayName);
 			}
+			A11y::speak(buf, false);
+			DebugLog::log("Inventory change auto-announcement: %s increased by %d (total: %d)", g_monitoredItems[i].codeName, diff, currentCount);
 		}
+		g_lastInventoryCounts[i] = currentCount;
 	}
 }
 
@@ -5097,7 +5017,8 @@ void main()
 									AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(horse, FALSE);
 									AI::SET_PED_PATH_AVOID_FIRE(horse, TRUE);
 									if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(horse, TRUE);
-									AI::TASK_FOLLOW_NAV_MESH_TO_COORD(horse, g_navTargetX, g_navTargetY, g_navTargetZ, speed, -1, 5.0f, TRUE, 0.0f);
+									// Apply the task to the player ped pp instead of horse to avoid engine crashes and freezes
+									AI::TASK_FOLLOW_NAV_MESH_TO_COORD(pp, g_navTargetX, g_navTargetY, g_navTargetZ, speed, -1, 5.0f, TRUE, 0.0f);
 								}
 							} else {
 								AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(pp, FALSE);
