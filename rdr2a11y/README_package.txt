@@ -1,78 +1,96 @@
-RDR2 Accessibility Trainer (Experimental)
-=========================================
+RED DEAD REDEMPTION 2 - ACCESSIBILITY MOD (Rdr access)
+**
 
-IMPORTANT: Experimental build – expect bugs and instability.
-- All features are experimental. Crashes or odd behavior can happen.
-- Use at your own risk. Make backups of your save games.
+IMPORTANT: This is an experimental build currently under active testing and development.
+The entire mod is under testing. All individual features (auto-navigation, teleportation, loot announcements, auto-aim, and bodyguards) are experimental and subject to bugs, stutters, or crashes. Please report issues and back up your save files.
 
-Install
--------
-1) Install ScriptHookRDR2 (runtime) from: http://www.dev-c.com/rdr2/scripthookrdr2/
-2) Copy these files into your Red Dead Redemption 2 game folder (where RDR2.exe is):
-How it works (Modes and Numpad)
-first, we have the normal NativeTrainer, f5 opening it menu and 0 to back or clost it. also backspace key should works too. 
+**
+INSTALLATION INSTRUCTIONS
+**
+1. Ensure you have ScriptHookRDR2 installed in your game folder (where RDR2.exe is).
+2. Copy all files from this folder directly into your Red Dead Redemption 2 game directory:
+   - NativeTrainer.asi
+   - tolk.dll
+   - nvdaControllerClient64.dll
+   - SAAPI64.dll
+3. Start your screen reader (NVDA or JAWS) before launching the game.
+4. Launch Red Dead Redemption 2.
 
--------------------------------
-outside the NativeTrainer, click these keys: 
-- Press NumPad 5 to cycle through modes: Global -> Horse -> Wolves -> Bodyguard.
-- In each mode, primary shortcuts are NumPad 1..0. Some extras use NumPad . (decimal).
+**
+GENERAL CONTROLS & MENU NAVIGATION
+**
+* F4: Open or Close the Trainer Menu.
+* Numpad 8 / 2: Navigate Up or Down in the menu options.
+* Numpad 4 / 6: Navigate Left or Right (or decrease/increase values).
+* Numpad 5: Select / Accept menu option.
+* Numpad 0: Back / Close submenu.
+* Tab Key: Re-announce / Speak the currently selected menu option.
 
-Global Mode
------------
-- N1: Player health and context (on foot/mount/vehicle, speed, cores)
-- N2: What you are riding/driving + speed
-- N3: Current weapon name
-- N4: Location (zone/place)
-- N5: Cycle mode
-- N6: Money total
-- N7: Honor (broken)  wanted intensity 
-- N8: Heading (compass)
-- N.: Heading (quick)
+**
+NUMPAD MODES SYSTEM
+**
+Outside of the Trainer Menu, Numpad 5 is used to cycle through 4 accessibility modes:
+Global Mode -> Horse Mode -> Bodyguard Mode -> Navigation Mode.
+Ensure NumLock is ON.
 
+1. GLOBAL MODE (General status checks)
+* Numpad 0: Speak current location (zone, area, and compass heading).
+* Numpad 3: Speak current weapon and available ammunition count.
+* Numpad 4: Speak player cores (Health, Stamina, DeadEye percentages) and Cash balance.
+* Numpad 6: Speak game time (period, hour, minute), Stamina bar, DeadEye bar, and Bounty.
+* Numpad 7: Speak wanted status (wanted level, bounty value, and wanted intensity).
+* Numpad 9: Speak player honor level.
 
-Horse Mode
-----------
-- N1: Horse status (health percent + stamina)
-- N2: Location (zone)
-- N3: Brush horse (clean)
-- N4: Feed horse (small heal + stamina)
-- N5: Cycle mode
+2. HORSE MODE (Horse status & whistling)
+* Numpad 0: Whistle and check horse distance (speaks distance and status: approaching, out of range, etc.).
+* Numpad 1: Speak horse breed, bonding level (1-4), and distance.
+* Numpad 2: Speak horse movement state and speed (idle, walking, trotting, cantering, galloping).
+* Numpad 3: Speak horse stamina bar and health bar.
+* Numpad 4: Speak horse cores (Health and Stamina cores).
 
-Wolves Mode (companion + pack)
-------------------------------
-- N1: Wolf status – main wolf health and percent.
-- N2: Gather – main wolf and helpers move to you and follow behind.
-- N3: Call/Regroup – plays a player call cue and schedules wolf howls. If your desired pack size > current helpers, howls will try to summon more wolves up to the desired size. Everyone regroups and follows.
-- N4: Toggle main wolf – spawn if none; dismiss if present (also clears helper pack and resets desired size).
-- N5: Cycle mode.
-- N6: Attack – command companion to attack the target you are aiming at (or melee target). Falls back to bodyguard if wolf unavailable.
-- N7: Increase desired pack – raises desired pack size (by 2 each press) up to the maximum; triggers howls to summon helpers.
-- N8: Decrease desired pack – lowers desired size (by 1). If you have more helpers than target, dismisses one immediately.
-- N9: Speak pack status – announces how many helper wolves you have (not counting the main wolf).
-- N0: Clear pack – dismisses all helper wolves but keeps the main wolf.
+3. NAVIGATION & POI BROWSER MODE (Auto-walk & Navigation)
+* Numpad 0: Speak current location with exact coordinates and compass direction.
+* Numpad 1: Toggle auto-walk forward (standard speed, follows roads).
+* Numpad 2: Toggle auto-walk fast (run / gallop).
+* Numpad 7 / 9: Select next / previous Point of Interest (POI) in the sorted list.
+* Numpad 4 / 6: Select previous / next mission or stranger activity.
+* Numpad 8: Toggle auto-navigation to the selected POI or mission. (Arthur/mount will walk automatically along the roads to the destination).
+* Numpad 3: Speak compass direction, degrees, current speed, and distance to target.
 
-Notes about Wolves
-------------------
-- The main wolf is friendly and follows you. Dismissing the main wolf also clears the pack and resets the desired size.
-- Sound cues are conservative to avoid crashes; sometimes audio may not play depending on game state.
-- Rapid key presses can cause short cooldowns for stability.
+4. BODYGUARD / SQUAD MODE (Command bodyguards)
+* Numpad 0: Cycle squad formation (Column, Line, Wedge).
+* Numpad 1: Speak squad status (alive count, combat status, and type breakdown: humans, wolves, cougars, etc.).
+* Numpad 2: Regroup (teleport all bodyguards back to you in formation).
+* Numpad 6: Toggle auto-defense (bodyguards automatically protect you when attacked).
+* Numpad 7: Command guards to follow player.
+* Numpad 8: Command guards to hold position (stay still).
+* Numpad 9: Command guards to guard this area.
+* Note: Bodyguards and animals must be spawned using the main Trainer Menu (F4).
 
-Bodyguard Mode
---------------
-- N1: Bodyguard status (health percent)
-- N2: Teleport bodyguard to you
-- N3: Follow close
-- N4: Toggle bodyguard (spawn/dismiss)
-- N5: Cycle mode
+**
+SPECIAL FEATURES (UNDER ACTIVE TESTING)
+**
 
-Troubleshooting
----------------
-- No speech? Ensure NVDA (or JAWS) is running and tolk.dll is next to NativeTrainer.asi.
-and nvdaControllerClient64.dll is available newr rdr2
-- Keys not working? Ensure NumLock is ON. 
-- Crashes/odd behavior: experimental build; reduce rapid presses and avoid stacking many actions.
+1. LOOT ANNOUNCER & INVENTORY TRACKER (Automatic)
+* Tracks your inventory in the background and instantly speaks looted items and quantities (e.g. "Looted 3 Yarrow", "Looted 1 Gold Ring").
+* Monitors 100% of satchel items (all 13 fish types, fish meats, plants, exotics, animal parts, feathers, and jewelry).
+* Warning System: Speaks "No items added. Inventory might be full." if a looting, skinning, or picking animation concludes but no items or cash were gained (meaning inventory was already full or target was empty).
+* Numpad Decimal Point Key (.): Diagnostic key. Speaks current position and writes detailed coordinates, nearby interactive objects, and a full inventory count to "nativetrainer.log" in your Documents folder.
 
-Credits
--------
-- ScriptHookRDR2 SDK by Alexander Blade , and it's Native Trainer.
-- Speech via Tolk. 
+2. AUTO-AIM SYSTEM (Combat Aid)
+* Toggle "AUTO AIM" inside the Accessibility sub-menu of the trainer (F4).
+* Hold the aim button (Right-Click on mouse or Left Trigger on controller) to automatically rotate the camera and lock onto the head of the nearest hostile NPC or animal within 150 meters. (Requires clear line of sight).
+
+**
+TROUBLESHOOTING & CONTACT
+**
+- If speech does not work, make sure NVDA or JAWS is running before starting the game.
+- If keys do not work, make sure NumLock is ON.
+- If you face bugs, check the "nativetrainer.log" file in your Documents folder for diagnostic data.
+
+**
+CREDITS
+**
+- ScriptHookRDR2 SDK by Alexander Blade.
+- Speech via Tolk.
+- Mod Developer: rakanAlmoutiri.

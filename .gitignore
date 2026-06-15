@@ -1,0 +1,26 @@
+# Visual Studio temporary files and build output
+*.obj
+*.pdb
+*.iobj
+*.ipdb
+*.recipe
+*.tlog
+*.log
+*.lastbuildstate
+vc143.pdb
+/rdr2a11y/samples/NativeTrainer/tmp/
+/ScriptHookRDR2_SDK_1.0.1207.73/samples/NativeTrainer/tmp/
+/rdr2a11y/samples/NativeTrainer/bin/
+/ScriptHookRDR2_SDK_1.0.1207.73/samples/NativeTrainer/bin/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Embedded git repository
+/rdr2a11y/rdr2example/
+
+
+# Local zip packages (if we only want to release via tags, but we will commit Rdr access version1.9.1.zip for now)
+# Rdr access/
+# Rdr access version1.9.1/

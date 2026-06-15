@@ -1137,7 +1137,7 @@ MenuBase *CreatePlayerTeleportMenu(MenuController *controller)
 	// Submenu: Post Offices
 	MenuBase *postOfficesMenu = new MenuBase(new MenuItemListTitle("POST OFFICES"));
 	controller->RegisterMenu(postOfficesMenu);
-	postOfficesMenu->AddItem(new MenuItemPlayerTeleport("VALENTINE POST OFFICE",   { -179.0f, 649.0f, 114.0f }, 0.0f, true));
+	postOfficesMenu->AddItem(new MenuItemPlayerTeleport("VALENTINE POST OFFICE",   { -174.0f, 633.0f, 114.0f }, 162.0f, true));
 	postOfficesMenu->AddItem(new MenuItemPlayerTeleport("RHODES POST OFFICE",      { 1232.20f, -1251.08f, 73.67f }, 90.0f, true));
 	postOfficesMenu->AddItem(new MenuItemPlayerTeleport("SAINT DENIS POST OFFICE", { 2747.49f, -1403.77f, 46.19f }, 180.0f, true));
 	postOfficesMenu->AddItem(new MenuItemPlayerTeleport("ANNESBURG POST OFFICE",    { 2904.36f, 1248.80f, 44.87f }, 90.0f, true));
@@ -1713,6 +1713,11 @@ static bool g_navIgnoreNPCs = false;
 static int g_navHorseSpeedLevel = 2; // 0=walk, 1=trot, 2=canter, 3=gallop
 static const wchar_t* g_navSpeedNames[] = { L"Walk", L"Trot", L"Canter", L"Gallop" };
 static const float g_navSpeedValues[] = { 1.0f, 1.8f, 2.5f, 3.5f };
+static float g_navCurrentSpeed = 1.0f;
+static int g_navOnFootSpeedLevel = 1; // 0=walk, 1=run, 2=sprint
+static const wchar_t* g_navOnFootSpeedNames[] = { L"Walk", L"Run", L"Sprint" };
+static const float g_navOnFootSpeedValues[] = { 1.0f, 2.0f, 3.0f };
+static bool g_navTransitionedToDirect = false;
 static bool g_navToTargetActive = false;
 static float g_navTargetX = 0.0f;
 static float g_navTargetY = 0.0f;
@@ -1784,6 +1789,16 @@ static const NavPOI g_navPOIs[] = {
 	{ -268.0f, 782.0f, 118.0f, L"Horseshoe Overlook Camp", L"Camp" },
 	// Trappers
 	{ -4612.0f, -2728.0f, -4.0f, L"Riggs Station Trapper", L"Trapper" },
+	// Post Offices
+	{ -174.0f, 633.0f, 114.0f, L"Valentine Post Office", L"Post Office" },
+	{ 1232.20f, -1251.08f, 73.67f, L"Rhodes Post Office", L"Post Office" },
+	{ 2747.49f, -1403.77f, 46.19f, L"Saint Denis Post Office", L"Post Office" },
+	{ 2904.36f, 1248.80f, 44.87f, L"Annesburg Post Office", L"Post Office" },
+	{ 2983.45f, 430.15f, 51.17f, L"Van Horn Post Office", L"Post Office" },
+	{ 1417.82f, 268.03f, 89.62f, L"Emerald Station Post Office", L"Post Office" },
+	{ -1350.0f, 530.0f, 96.0f, L"Wallace Station Post Office", L"Post Office" },
+	{ -182.0f, 757.0f, 118.0f, L"Flatneck Station Post Office", L"Post Office" },
+	{ -4612.0f, -2728.0f, -4.0f, L"Riggs Station Post Office", L"Post Office" },
 };
 static const int g_numNavPOIs = sizeof(g_navPOIs) / sizeof(g_navPOIs[0]);
 static int g_navCurrentPOI = 0; // current index in POI list
@@ -1945,7 +1960,7 @@ static Ped GetPlayerHorse(Ped playerPed) {
 		if (p && p != playerPed && ENTITY::DOES_ENTITY_EXIST(p) && !ENTITY::IS_ENTITY_DEAD(p)) {
 			if (IsPedHorse(p)) {
 				// Check if this horse belongs to the player (bonding level > 0, or currently ridden)
-				int bondLevel = invoke<int>(0x454AD4DA6C41B5BD, p); // _GET_MOUNT_BONDING_LEVEL
+				int bondLevel = invoke<int>(0xA4C8E23E29040DE0, p, 7); // GET_ATTRIBUTE_RANK (PA_BONDING = 7)
 				bool isCurrentMount = (p == PED::GET_MOUNT(playerPed));
 				if (bondLevel > 0 || isCurrentMount) {
 					Vector3 hPos = ENTITY::GET_ENTITY_COORDS(p, TRUE, FALSE);
@@ -3569,8 +3584,8 @@ static void HandleHorseHotkeys() {
 		if (!hasHorse) { A11y::speak(L"No horse nearby", true); return; }
 		Hash model = ENTITY::GET_ENTITY_MODEL(horse);
 		const wchar_t* horseName = GetHorseName(model);
-		// _GET_MOUNT_BONDING_LEVEL: 0x454AD4DA6C41B5BD - returns bonding level 1-4
-		int bondLevel = invoke<int>(0x454AD4DA6C41B5BD, horse);
+		// GET_ATTRIBUTE_RANK (PA_BONDING = 7) - returns bonding level 1-4
+		int bondLevel = invoke<int>(0xA4C8E23E29040DE0, horse, 7);
 		if (bondLevel < 0) bondLevel = 0;
 		if (bondLevel > 4) bondLevel = 4;
 		
@@ -3833,6 +3848,7 @@ static void HandleNavigationHotkeys() {
 				}
 			}
 			AI::TASK_FOLLOW_NAV_MESH_TO_COORD(playerPed, targetX, targetY, targetZ, speed, -1, 2.0f, TRUE, 0.0f);
+			g_navCurrentSpeed = speed;
 			g_autoWalkActive = true;
 			g_navToTargetActive = false;
 			A11y::speak(L"Auto walk on", true);
@@ -3881,6 +3897,7 @@ static void HandleNavigationHotkeys() {
 				}
 			}
 			AI::TASK_FOLLOW_NAV_MESH_TO_COORD(playerPed, targetX, targetY, targetZ, speed, -1, 2.0f, TRUE, 0.0f);
+			g_navCurrentSpeed = speed;
 			g_autoWalkActive = true;
 			g_navToTargetActive = false;
 			A11y::speak(L"Auto run on", true);
@@ -4062,8 +4079,29 @@ static void HandleNavigationHotkeys() {
 		g_stuckAccumulatorSecs = 0;
 
 		// Navigate using navmesh (follows roads, avoids cliffs)
-		float speed = mounted ? g_navSpeedValues[g_navHorseSpeedLevel] : 1.0f;
+		float speed = mounted ? g_navSpeedValues[g_navHorseSpeedLevel] : g_navOnFootSpeedValues[g_navOnFootSpeedLevel];
+		g_navCurrentSpeed = speed;
+		g_navTransitionedToDirect = false;
 		
+		float navX = tx;
+		float navY = ty;
+		float navZ = tz;
+
+		if (isIndoor) {
+			Vector3 safePos = { 0.0f, 0.0f, 0.0f };
+			if (PATHFIND::GET_SAFE_COORD_FOR_PED(tx, ty, tz, TRUE, &safePos, 0)) {
+				navX = safePos.x;
+				navY = safePos.y;
+				navZ = safePos.z;
+				DebugLog::log("POI navigation: resolved safe navmesh coord for indoor target at (%f, %f, %f)", navX, navY, navZ);
+			} else if (PATHFIND::GET_CLOSEST_VEHICLE_NODE(tx, ty, tz, &safePos, 1, 3.0f, 0)) {
+				navX = safePos.x;
+				navY = safePos.y;
+				navZ = safePos.z;
+				DebugLog::log("POI navigation: resolved closest vehicle node for indoor target at (%f, %f, %f)", navX, navY, navZ);
+			}
+		}
+
 		AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(playerPed, FALSE);
 		AI::SET_PED_PATH_AVOID_FIRE(playerPed, TRUE);
 		if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(playerPed, TRUE);
@@ -4075,11 +4113,24 @@ static void HandleNavigationHotkeys() {
 				AI::SET_PED_PATH_AVOID_FIRE(horse, TRUE);
 				if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(horse, TRUE);
 			}
-			AI::TASK_FOLLOW_NAV_MESH_TO_COORD(playerPed, tx, ty, tz, speed, -1, 5.0f, TRUE, 0.0f);
-			DebugLog::log("Started mounted auto-navigation: player on horse=%d to %ls (%f, %f, %f), speed=%.2f", horse, targetName, tx, ty, tz, speed);
+			AI::TASK_FOLLOW_NAV_MESH_TO_COORD(playerPed, navX, navY, navZ, speed, -1, 5.0f, TRUE, 0.0f);
+			DebugLog::log("Started mounted auto-navigation: player on horse=%d to %ls (%f, %f, %f), speed=%.2f", horse, targetName, navX, navY, navZ, speed);
 		} else {
-			AI::TASK_GO_TO_COORD_ANY_MEANS(playerPed, tx, ty, tz, speed, 0, FALSE, 0, 0.0f);
-			DebugLog::log("Started on-foot auto-navigation: player to %ls (%f, %f, %f), speed=%.2f", targetName, tx, ty, tz, speed);
+			if (dist > 10.0f) {
+				AI::TASK_FOLLOW_NAV_MESH_TO_COORD(playerPed, navX, navY, navZ, speed, -1, 2.0f, TRUE, 0.0f);
+				g_navTransitionedToDirect = false;
+				DebugLog::log("Started on-foot navmesh auto-navigation: player to %ls (%f, %f, %f), speed=%.2f", targetName, navX, navY, navZ, speed);
+			} else {
+				if (isIndoor) {
+					AI::TASK_GO_TO_COORD_ANY_MEANS(playerPed, tx, ty, tz, speed, 0, FALSE, 0, 0.0f);
+					g_navTransitionedToDirect = true;
+					DebugLog::log("Started on-foot direct auto-navigation (close): player to %ls (%f, %f, %f), speed=%.2f", targetName, tx, ty, tz, speed);
+				} else {
+					AI::TASK_FOLLOW_NAV_MESH_TO_COORD(playerPed, navX, navY, navZ, speed, -1, 2.0f, TRUE, 0.0f);
+					g_navTransitionedToDirect = false;
+					DebugLog::log("Started on-foot navmesh auto-navigation (close outdoor): player to %ls (%f, %f, %f), speed=%.2f", targetName, navX, navY, navZ, speed);
+				}
+			}
 		}
 
 		g_navTargetX = tx;
@@ -4260,11 +4311,24 @@ public:
 	MenuItemNavHorseSpeed(string caption) : MenuItemDefault(caption) {}
 };
 
+class MenuItemNavOnFootSpeed : public MenuItemDefault
+{
+	virtual void OnSelect() {
+		g_navOnFootSpeedLevel = (g_navOnFootSpeedLevel + 1) % 3;
+		wchar_t buf[100];
+		swprintf_s(buf, L"On foot speed: %s", g_navOnFootSpeedNames[g_navOnFootSpeedLevel]);
+		A11y::speak(buf, true);
+	}
+public:
+	MenuItemNavOnFootSpeed(string caption) : MenuItemDefault(caption) {}
+};
+
 MenuBase *CreateNavSettingsMenu(MenuController *controller) {
 	auto menu = new MenuBase(new MenuItemTitle("AUTO NAVIGATION SETTINGS"));
 	controller->RegisterMenu(menu);
 	menu->AddItem(new MenuItemNavIgnoreNPCsToggle("IGNORE NPCS"));
 	menu->AddItem(new MenuItemNavHorseSpeed("HORSE SPEED"));
+	menu->AddItem(new MenuItemNavOnFootSpeed("ON FOOT SPEED"));
 	return menu;
 }
 
@@ -4674,7 +4738,166 @@ static MonitoredItem g_monitoredItems[] = {
 	{ "CONSUMABLE_COCAINE_CHEWING_GUM", 0, L"Cocaine Chewing Gum" },
 	{ "CONSUMABLE_MEDICINE", 0, L"Medicine" },
 	{ "CONSUMABLE_POTENT_MEDICINE", 0, L"Potent Medicine" },
-	{ "CONSUMABLE_SPECIAL_MEDICINE", 0, L"Special Medicine" }
+	{ "CONSUMABLE_SPECIAL_MEDICINE", 0, L"Special Medicine" },
+
+	// Animal Pelts / Skins
+	{ "PROVISION_DEER_PELT", 0, L"Deer Pelt" },
+	{ "PROVISION_WOLF_PELT", 0, L"Wolf Pelt" },
+	{ "PROVISION_RABBIT_PELT", 0, L"Rabbit Pelt" },
+	{ "PROVISION_BOAR_PELT", 0, L"Boar Pelt" },
+	{ "PROVISION_COYOTE_PELT", 0, L"Coyote Pelt" },
+	{ "PROVISION_BEAR_PELT", 0, L"Bear Pelt" },
+	{ "PROVISION_FOX_PELT", 0, L"Fox Pelt" },
+	{ "PROVISION_ELK_PELT", 0, L"Elk Pelt" },
+	{ "PROVISION_BISON_PELT", 0, L"Bison Pelt" },
+	{ "PROVISION_ALLIGATOR_SKIN", 0, L"Alligator Skin" },
+	{ "PROVISION_COUGAR_PELT", 0, L"Cougar Pelt" },
+	{ "PROVISION_PANTHER_PELT", 0, L"Panther Pelt" },
+	{ "PROVISION_MOOSE_PELT", 0, L"Moose Pelt" },
+	{ "PROVISION_BEAVER_PELT", 0, L"Beaver Pelt" },
+	{ "PROVISION_RACCOON_PELT", 0, L"Raccoon Pelt" },
+	{ "PROVISION_BADGER_PELT", 0, L"Badger Pelt" },
+	{ "PROVISION_OPOSSUM_PELT", 0, L"Opossum Pelt" },
+	{ "PROVISION_SKUNK_PELT", 0, L"Skunk Pelt" },
+	{ "PROVISION_MUSKRAT_PELT", 0, L"Muskrat Pelt" },
+	{ "PROVISION_SQUIRREL_PELT", 0, L"Squirrel Pelt" },
+	{ "PROVISION_RAT_PELT", 0, L"Rat Pelt" },
+	{ "PROVISION_SNAKE_SKIN", 0, L"Snake Skin" },
+	{ "PROVISION_IGUANA_SKIN", 0, L"Iguana Skin" },
+
+	// Animal Parts & Meat
+	{ "PROVISION_ANIMAL_FAT", 0, L"Animal Fat" },
+	{ "PROVISION_FLIGHT_FEATHER", 0, L"Flight Feather" },
+	{ "PROVISION_TURKEY_FEATHER", 0, L"Turkey Feather" },
+	{ "PROVISION_HAWK_FEATHER", 0, L"Hawk Feather" },
+	{ "PROVISION_EAGLE_FEATHER", 0, L"Eagle Feather" },
+	{ "PROVISION_OWL_FEATHER", 0, L"Owl Feather" },
+	{ "PROVISION_RAVEN_FEATHER", 0, L"Raven Feather" },
+	{ "PROVISION_DUCK_FEATHER", 0, L"Duck Feather" },
+	{ "PROVISION_GOOSE_FEATHER", 0, L"Goose Feather" },
+	{ "PROVISION_VENISON", 0, L"Venison" },
+	{ "PROVISION_DEER_MEAT", 0, L"Deer Meat" },
+	{ "PROVISION_BIG_GAME_MEAT", 0, L"Big Game Meat" },
+	{ "PROVISION_GAME_MEAT", 0, L"Game Meat" },
+	{ "PROVISION_POULTRY_MEAT", 0, L"Poultry Meat" },
+	{ "PROVISION_MUTTON", 0, L"Mutton" },
+	{ "PROVISION_BEEF", 0, L"Beef" },
+	{ "PROVISION_PORK", 0, L"Pork" },
+
+	// Herbs & Plants
+	{ "PROVISION_YARROW", 0, L"Yarrow" },
+	{ "PROVISION_WILD_CARROT", 0, L"Wild Carrot" },
+	{ "PROVISION_INDIAN_TOBACCO", 0, L"Indian Tobacco" },
+	{ "PROVISION_GINSENG", 0, L"Ginseng" },
+	{ "PROVISION_ALASKAN_GINSENG", 0, L"Alaskan Ginseng" },
+	{ "PROVISION_AMERICAN_GINSENG", 0, L"American Ginseng" },
+	{ "PROVISION_BAY_BOLETE", 0, L"Bay Bolete" },
+	{ "PROVISION_BLACK_BLACKBERRY", 0, L"Blackberry" },
+	{ "PROVISION_BLACK_BLACKCURRANT", 0, L"Blackcurrant" },
+	{ "PROVISION_BURDOCK_ROOT", 0, L"Burdock Root" },
+	{ "PROVISION_CHANTERELLES", 0, L"Chanterelles" },
+	{ "PROVISION_COMMON_BULRUSH", 0, L"Common Bulrush" },
+	{ "PROVISION_CREEPING_THYME", 0, L"Creeping Thyme" },
+	{ "PROVISION_ENGLISH_MACE", 0, L"English Mace" },
+	{ "PROVISION_GOLDEN_CURRANT", 0, L"Golden Currant" },
+	{ "PROVISION_HUMMINGBIRD_SAGE", 0, L"Hummingbird Sage" },
+	{ "PROVISION_MILKWEED", 0, L"Milkweed" },
+	{ "PROVISION_OLEANDER_SAGE", 0, L"Oleander Sage" },
+	{ "PROVISION_OREGANO", 0, L"Oregano" },
+	{ "PROVISION_PARASOL_MUSHROOM", 0, L"Parasol Mushroom" },
+	{ "PROVISION_PRAIRIE_POPPY", 0, L"Prairie Poppy" },
+	{ "PROVISION_RAMS_HEAD", 0, L"Ram's Head" },
+	{ "PROVISION_RED_RASPBERRY", 0, L"Red Raspberry" },
+	{ "PROVISION_RED_SAGE", 0, L"Red Sage" },
+	{ "PROVISION_VANILLA_FLOWER", 0, L"Vanilla Flower" },
+	{ "PROVISION_VIOLET_SNOWDROP", 0, L"Violet Snowdrop" },
+	{ "PROVISION_WILD_FEVERFEW", 0, L"Wild Feverfew" },
+	{ "PROVISION_WILD_MINT", 0, L"Wild Mint" },
+	{ "PROVISION_WINTERGREEN_BERRY", 0, L"Wintergreen Berry" },
+
+	// Exotic Orchids
+	{ "PROVISION_ORCHID_ACUNAS_STAR", 0, L"Acuna's Star Orchid" },
+	{ "PROVISION_ORCHID_CIGAR", 0, L"Cigar Orchid" },
+	{ "PROVISION_ORCHID_CLAM_SHELL", 0, L"Clamshell Orchid" },
+	{ "PROVISION_ORCHID_DRAGONS_MOUTH", 0, L"Dragon's Mouth Orchid" },
+	{ "PROVISION_ORCHID_GHOST", 0, L"Ghost Orchid" },
+	{ "PROVISION_ORCHID_LADY_SLIPPER", 0, L"Lady Slipper Orchid" },
+	{ "PROVISION_ORCHID_MOCASSIN", 0, L"Moccasin Orchid" },
+	{ "PROVISION_ORCHID_NIGHT_SCENTED", 0, L"Night-scented Orchid" },
+	{ "PROVISION_ORCHID_QUEENS", 0, L"Queen's Orchid" },
+	{ "PROVISION_ORCHID_RAT_TAIL", 0, L"Rat-tail Orchid" },
+	{ "PROVISION_ORCHID_SPARROWS_FOOT", 0, L"Sparrow's-foot Orchid" },
+	{ "PROVISION_ORCHID_SPIDER", 0, L"Spider Orchid" },
+
+	// Animal Parts & Feathers (Expanded)
+	{ "PROVISION_ALLIGATOR_EGG", 0, L"Alligator Egg" },
+	{ "PROVISION_BEAR_CLAW", 0, L"Bear Claw" },
+	{ "PROVISION_BEAVER_TOOTH", 0, L"Beaver Tooth" },
+	{ "PROVISION_BOAR_TUSK", 0, L"Boar Tusk" },
+	{ "PROVISION_COUGAR_FANG", 0, L"Cougar Fang" },
+	{ "PROVISION_ELK_ANTLER", 0, L"Elk Antler" },
+	{ "PROVISION_EGRET_FEATHER", 0, L"Egret Feather" },
+	{ "PROVISION_HERON_FEATHER", 0, L"Heron Feather" },
+	{ "PROVISION_SPOONBILL_FEATHER", 0, L"Spoonbill Feather" },
+	{ "PROVISION_PELICAN_FEATHER", 0, L"Pelican Feather" },
+	{ "PROVISION_TURKEY_MEAT", 0, L"Turkey Meat" },
+
+	// Jewelry & Valuables (Expanded)
+	{ "KIT_GOLD_NECKLACE", 0, L"Gold Necklace" },
+	{ "KIT_SILVER_NECKLACE", 0, L"Silver Necklace" },
+	{ "KIT_PLATINUM_NECKLACE", 0, L"Platinum Necklace" },
+	{ "KIT_GOLD_EARRING", 0, L"Gold Earring" },
+	{ "KIT_SILVER_EARRING", 0, L"Silver Earring" },
+	{ "KIT_PLATINUM_EARRING", 0, L"Platinum Earring" },
+
+	// Lootable watches overrides
+	{ "gold_pocket_watch_val", 0xB04DA3FC, L"Gold Pocket Watch" },
+
+	// Fish & Fish Meat
+	{ "PROVISION_FISH_BLUEGILL", 0, L"Bluegill" },
+	{ "PROVISION_FISH_BULLHEAD_CATFISH", 0, L"Bullhead Catfish" },
+	{ "PROVISION_FISH_CHAIN_PICKEREL", 0, L"Chain Pickerel" },
+	{ "PROVISION_FISH_LAKE_STURGEON", 0, L"Lake Sturgeon" },
+	{ "PROVISION_FISH_LARGEMOUTH_BASS", 0, L"Largemouth Bass" },
+	{ "PROVISION_FISH_MUSKIE", 0, L"Muskie" },
+	{ "PROVISION_FISH_PERCH", 0, L"Perch" },
+	{ "PROVISION_FISH_RED_FIN_PICKEREL", 0, L"Redfin Pickerel" },
+	{ "PROVISION_FISH_ROCK_BASS", 0, L"Rock Bass" },
+	{ "PROVISION_FISH_SMALLMOUTH_BASS", 0, L"Smallmouth Bass" },
+	{ "PROVISION_FISH_SOCKEYE_SALMON", 0, L"Sockeye Salmon" },
+	{ "PROVISION_FISH_STEELHEAD_TROUT", 0, L"Steelhead Trout" },
+	{ "PROVISION_FISH_CHANNEL_CATFISH", 0, L"Channel Catfish" },
+	{ "PROVISION_SUCCULENT_FISH", 0, L"Succulent Fish Meat" },
+	{ "PROVISION_FLAKY_FISH", 0, L"Flaky Fish Meat" },
+	{ "PROVISION_GRITTY_FISH", 0, L"Gritty Fish Meat" },
+	{ "PROVISION_CRUSTACEAN_MEAT", 0, L"Crustacean Meat" },
+
+	// Opened consumables & tools
+	{ "CONSUMABLE_GUN_OIL", 0, L"Gun Oil" },
+	{ "CONSUMABLE_HAIR_TONIC", 0, L"Hair Tonic" },
+	{ "CONSUMABLE_POMADE", 0, L"Hair Pomade" },
+	{ "CONSUMABLE_OPENED_HEALTH_CURE", 0, L"Opened Health Cure" },
+	{ "CONSUMABLE_OPENED_SNAKE_OIL", 0, L"Opened Snake Oil" },
+	{ "CONSUMABLE_OPENED_MIRACLE_TONIC", 0, L"Opened Miracle Tonic" },
+	{ "CONSUMABLE_OPENED_BITTERS", 0, L"Opened Bitters" },
+	{ "CONSUMABLE_OPENED_MEDICINE", 0, L"Opened Medicine" },
+	{ "PROVISION_OPENED_WHISKEY", 0, L"Opened Whiskey" },
+	{ "PROVISION_OPENED_GIN", 0, L"Opened Gin" },
+	{ "PROVISION_OPENED_FINE_BRANDY", 0, L"Opened Fine Brandy" },
+	{ "PROVISION_OPENED_GUARMA_RUM", 0, L"Opened Guarma Rum" },
+
+	// Horse consumables & revivers
+	{ "CONSUMABLE_HORSE_MEDICINE", 0, L"Horse Medicine" },
+	{ "CONSUMABLE_HORSE_MEDICINE_POTENT", 0, L"Potent Horse Medicine" },
+	{ "CONSUMABLE_HORSE_MEDICINE_SPECIAL", 0, L"Special Horse Medicine" },
+	{ "CONSUMABLE_HORSE_STIMULANT", 0, L"Horse Stimulant" },
+	{ "CONSUMABLE_HORSE_STIMULANT_POTENT", 0, L"Potent Horse Stimulant" },
+	{ "CONSUMABLE_HORSE_STIMULANT_SPECIAL", 0, L"Special Horse Stimulant" },
+	{ "CONSUMABLE_HORSE_REVIVER", 0, L"Horse Reviver" },
+	{ "CONSUMABLE_HORSE_REVIVER_POTENT", 0, L"Potent Horse Reviver" },
+	{ "CONSUMABLE_HORSE_REVIVER_SPECIAL", 0, L"Special Horse Reviver" },
+	{ "CONSUMABLE_HORSE_OAT_ROLLS", 0, L"Oat Rolls" },
+	{ "CONSUMABLE_HORSE_HAY", 0, L"Hay" }
 };
 
 static const int g_monitoredItemsCount = sizeof(g_monitoredItems) / sizeof(g_monitoredItems[0]);
@@ -4726,15 +4949,47 @@ static void HandleAutoLootAnnounce() {
 	if (now - lastLootCheckTime < 300) return;
 	lastLootCheckTime = now;
 
+	// Track looting target
+	static bool s_isLootingActive = false;
+	static Entity s_lastLootTarget = 0;
+	static DWORD s_lootEndTime = 0;
+	static bool s_pendingLootCheck = false;
+	static int s_preLootCounts[250] = { 0 }; // Allocate static size larger than g_monitoredItemsCount
+	static int s_preLootMoney = 0;
+
+	Entity currentTarget = invoke<Entity>(0x14169FA823679E41, playerPed); // GET_LOOTING_PICKUP_TARGET_ENTITY
+	if (currentTarget != 0) {
+		if (!s_isLootingActive) {
+			s_isLootingActive = true;
+			s_lastLootTarget = currentTarget;
+			s_pendingLootCheck = false;
+			s_preLootMoney = invoke<int>(0x0C02DABFA3B98176); // _MONEY_GET_CASH_BALANCE
+			for (int i = 0; i < g_monitoredItemsCount && i < 250; ++i) {
+				s_preLootCounts[i] = invoke<int>(0xE787F05DFC977BDE, invId, g_monitoredItems[i].hash, FALSE);
+			}
+			DebugLog::log("Loot Announcer: Loot/Pick interaction started near entity %d", currentTarget);
+		}
+	} else {
+		if (s_isLootingActive) {
+			s_isLootingActive = false;
+			s_lootEndTime = GetTickCount();
+			s_pendingLootCheck = true;
+			DebugLog::log("Loot Announcer: Loot/Pick interaction finished near entity %d. Waiting for sync.", s_lastLootTarget);
+		}
+	}
+
 	if (!g_inventoryInitialized) {
 		// Initialize the baseline inventory snapshot
 		for (int i = 0; i < g_monitoredItemsCount; ++i) {
 			g_lastInventoryCounts[i] = invoke<int>(0xE787F05DFC977BDE, invId, g_monitoredItems[i].hash, FALSE);
 		}
 		g_inventoryInitialized = true;
+		s_pendingLootCheck = false; // Reset to avoid false warnings on startup
 		return;
 	}
 
+	// Regular inventory change detection
+	bool itemAdded = false;
 	for (int i = 0; i < g_monitoredItemsCount; ++i) {
 		int currentCount = invoke<int>(0xE787F05DFC977BDE, invId, g_monitoredItems[i].hash, FALSE);
 		int diff = currentCount - g_lastInventoryCounts[i];
@@ -4747,10 +5002,40 @@ static void HandleAutoLootAnnounce() {
 			}
 			A11y::speak(buf, false);
 			DebugLog::log("Inventory change auto-announcement: %s increased by %d (total: %d)", g_monitoredItems[i].codeName, diff, currentCount);
+			itemAdded = true;
 		}
 		g_lastInventoryCounts[i] = currentCount;
 	}
+
+	// Check if money increased
+	int currentMoney = invoke<int>(0x0C02DABFA3B98176); // _MONEY_GET_CASH_BALANCE
+	if (currentMoney > s_preLootMoney) {
+		itemAdded = true;
+	}
+
+	// If a loot action just completed, verify if anything was added
+	if (s_pendingLootCheck && (GetTickCount() - s_lootEndTime >= 1200)) {
+		s_pendingLootCheck = false;
+		// Check if any items actually increased compared to pre-loot snapshot
+		bool actuallyAdded = false;
+		if (currentMoney > s_preLootMoney) {
+			actuallyAdded = true;
+		}
+		for (int i = 0; i < g_monitoredItemsCount && i < 250; ++i) {
+			int currentCount = invoke<int>(0xE787F05DFC977BDE, invId, g_monitoredItems[i].hash, FALSE);
+			if (currentCount > s_preLootCounts[i]) {
+				actuallyAdded = true;
+			}
+		}
+
+		if (!actuallyAdded) {
+			// Looting was done but nothing was added!
+			A11y::speak(L"No items added. Inventory might be full.", false);
+			DebugLog::log("Loot Announcer: Loot completed but nothing added (inventory full or target empty)");
+		}
+	}
 }
+
 
 // =======================================
 // AUTO-AIM SYSTEM (accessibility for blind players)
@@ -4993,11 +5278,21 @@ void main()
 	
 	while (true)
 	{		
-		// Pause menu accessibility (always runs)
+			// Pause menu accessibility (always runs)
 		HandlePauseMenuAccessibility();
 
 		// Process asynchronous bodyguard spawns
 		ProcessPendingSpawns();
+		// Every-frame speed enforcement for player on foot
+		if (g_autoWalkActive) {
+			Ped pp = PLAYER::PLAYER_PED_ID();
+			if (ENTITY::DOES_ENTITY_EXIST(pp) && !ENTITY::IS_ENTITY_DEAD(pp)) {
+				bool mounted = PED::IS_PED_ON_MOUNT(pp);
+				if (!mounted) {
+					AI::SET_PED_DESIRED_MOVE_BLEND_RATIO(pp, g_navCurrentSpeed);
+				}
+			}
+		}
 
 		// Monitor auto-navigation target arrival
 		if (g_autoWalkActive && g_navToTargetActive) {
@@ -5009,7 +5304,7 @@ void main()
 				bool mounted = PED::IS_PED_ON_MOUNT(pp);
 				float arrivalThreshold = 8.0f;
 				if (g_navTargetIsIndoor) {
-					arrivalThreshold = mounted ? 8.0f : 1.8f;
+					arrivalThreshold = mounted ? 8.0f : 1.1f;
 				}
 
 				if (dist < arrivalThreshold) {
@@ -5044,6 +5339,15 @@ void main()
 					A11y::speak(buf, true);
 					DebugLog::log("Arrived at target: %ls (indoor=%d, mounted=%d)", g_navTargetName, g_navTargetIsIndoor, mounted);
 				} else {
+					// Check if we need to transition to direct pathing for indoor shop
+					if (!mounted && g_navTargetIsIndoor && !g_navTransitionedToDirect && dist <= 10.0f) {
+						DebugLog::log("Transitioning to direct pathing (indoor target closer than 10m)");
+						A11y::speak(L"Entering building...", false);
+						AI::CLEAR_PED_TASKS(pp, TRUE, FALSE);
+						AI::TASK_GO_TO_COORD_ANY_MEANS(pp, g_navTargetX, g_navTargetY, g_navTargetZ, g_navCurrentSpeed, 0, FALSE, 0, 0.0f);
+						g_navTransitionedToDirect = true;
+					}
+
 					// Stuck detection
 					DWORD now = GetTickCount();
 					if (now - g_lastStuckCheckMs >= 1000) {
@@ -5057,12 +5361,29 @@ void main()
 						g_lastStuckCheckMs = now;
 
 						bool mounted = PED::IS_PED_ON_MOUNT(pp);
-						float speed = mounted ? g_navSpeedValues[g_navHorseSpeedLevel] : 1.0f;
+						float speed = mounted ? g_navSpeedValues[g_navHorseSpeedLevel] : g_navOnFootSpeedValues[g_navOnFootSpeedLevel];
 
 						if (g_stuckAccumulatorSecs == 3 || g_stuckAccumulatorSecs == 6) {
 							DebugLog::log("Navigation stuck detector: static for %d seconds. Repathing...", g_stuckAccumulatorSecs);
 							A11y::speak(L"Stuck, repathing...", false);
 							
+							float navX = g_navTargetX;
+							float navY = g_navTargetY;
+							float navZ = g_navTargetZ;
+
+							if (g_navTargetIsIndoor) {
+								Vector3 safePos = { 0.0f, 0.0f, 0.0f };
+								if (PATHFIND::GET_SAFE_COORD_FOR_PED(g_navTargetX, g_navTargetY, g_navTargetZ, TRUE, &safePos, 0)) {
+									navX = safePos.x;
+									navY = safePos.y;
+									navZ = safePos.z;
+								} else if (PATHFIND::GET_CLOSEST_VEHICLE_NODE(g_navTargetX, g_navTargetY, g_navTargetZ, &safePos, 1, 3.0f, 0)) {
+									navX = safePos.x;
+									navY = safePos.y;
+									navZ = safePos.z;
+								}
+							}
+
 							AI::CLEAR_PED_TASKS_IMMEDIATELY(pp, TRUE, TRUE);
 							if (mounted) {
 								Ped horse = PED::GET_MOUNT(pp);
@@ -5072,13 +5393,19 @@ void main()
 									AI::SET_PED_PATH_AVOID_FIRE(horse, TRUE);
 									if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(horse, TRUE);
 									// Apply the task to the player ped pp instead of horse to avoid engine crashes and freezes
-									AI::TASK_FOLLOW_NAV_MESH_TO_COORD(pp, g_navTargetX, g_navTargetY, g_navTargetZ, speed, -1, 5.0f, TRUE, 0.0f);
+									AI::TASK_FOLLOW_NAV_MESH_TO_COORD(pp, navX, navY, navZ, speed, -1, 5.0f, TRUE, 0.0f);
 								}
 							} else {
 								AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(pp, FALSE);
 								AI::SET_PED_PATH_AVOID_FIRE(pp, TRUE);
 								if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(pp, TRUE);
-								AI::TASK_GO_TO_COORD_ANY_MEANS(pp, g_navTargetX, g_navTargetY, g_navTargetZ, speed, 0, FALSE, 0, 0.0f);
+								if (g_navTargetIsIndoor && dist <= 10.0f) {
+									AI::TASK_GO_TO_COORD_ANY_MEANS(pp, g_navTargetX, g_navTargetY, g_navTargetZ, speed, 0, FALSE, 0, 0.0f);
+									g_navTransitionedToDirect = true;
+								} else {
+									AI::TASK_FOLLOW_NAV_MESH_TO_COORD(pp, navX, navY, navZ, speed, -1, 2.0f, TRUE, 0.0f);
+									g_navTransitionedToDirect = false;
+								}
 							}
 						} else if (g_stuckAccumulatorSecs >= 9) {
 							DebugLog::log("Navigation stuck detector: static for 9 seconds. Stopping navigation.");
@@ -5162,6 +5489,21 @@ void main()
 						}
 					}
 					DebugLog::log("DIAGNOSTIC: Logged %d nearby objects within 8 meters.", loggedCount);
+
+					// Scan player inventory for diagnostics
+					int invId = invoke<int>(0x13D234A2A3F66E63, pp); // _INVENTORY_GET_INVENTORY_ID_FROM_PED
+					if (invId == 0) invId = 1;
+					DebugLog::log("DIAGNOSTIC: Scanning player inventory (invId=%d):", invId);
+					int scanCount = 0;
+					for (int i = 0; i < g_monitoredItemsCount; ++i) {
+						int itemCount = invoke<int>(0xE787F05DFC977BDE, invId, g_monitoredItems[i].hash, FALSE);
+						if (itemCount > 0) {
+							DebugLog::log("  Item %d: %s (%ls) = %d", i, g_monitoredItems[i].codeName, g_monitoredItems[i].displayName, itemCount);
+							scanCount++;
+						}
+					}
+					DebugLog::log("DIAGNOSTIC: Scanned %d items with non-zero count.", scanCount);
+					A11y::speak(L"Inventory logged", false);
 				}
 			}
 		}
@@ -5312,7 +5654,7 @@ void main()
 					if (horse && ENTITY::DOES_ENTITY_EXIST(horse)) {
 						Hash model = ENTITY::GET_ENTITY_MODEL(horse);
 						const wchar_t* hName = GetHorseName(model);
-						int bond = invoke<int>(0x454AD4DA6C41B5BD, horse);
+						int bond = invoke<int>(0xA4C8E23E29040DE0, horse, 7);
 						if (bond < 0) bond = 0; if (bond > 4) bond = 4;
 						wchar_t buf[200];
 						swprintf_s(buf, L"Mounted %s. Bonding %d", hName, bond);
