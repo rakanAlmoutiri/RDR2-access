@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.9.2
+
+### Added
+- Expanded monitored inventory list to include store-bought provisions (carrots, celery, peaches, cherries, pears).
+
+### Changed
+- Refined Auto-Aim lock target to focus on the chest/torso instead of the head to ensure bullet hits.
+- Changed Loot Announcer prefix from "Looted" to "Added" for neutral store purchase and looting notifications.
+- Fixed rapid speech clipping in Loot Announcer by concatenating overlapping speech events.
+- Renamed the trainer build to "RDR access.asi" and updated all packaging.
+
+### Removed
+- Completely removed Navigation Mode and related menus/hotkeys.
+
 ## v0.1
 
 ### Added

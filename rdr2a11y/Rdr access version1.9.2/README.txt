@@ -2,14 +2,14 @@ RED DEAD REDEMPTION 2 - ACCESSIBILITY MOD (Rdr access)
 **
 
 IMPORTANT: This is an experimental build currently under active testing and development.
-The entire mod is under testing. All individual features (auto-navigation, teleportation, loot announcements, auto-aim, and bodyguards) are experimental and subject to bugs, stutters, or crashes. Please report issues and back up your save files.
+The entire mod is under testing. All individual features (teleportation, loot announcements, auto-aim, and bodyguards) are experimental and subject to bugs, stutters, or crashes. Please report issues and back up your save files.
 
 **
 INSTALLATION INSTRUCTIONS
 **
 1. Ensure you have ScriptHookRDR2 installed in your game folder (where RDR2.exe is).
 2. Copy all files from this folder directly into your Red Dead Redemption 2 game directory:
-   - NativeTrainer.asi
+   - RDR access.asi
    - tolk.dll
    - nvdaControllerClient64.dll
    - SAAPI64.dll
@@ -29,8 +29,8 @@ GENERAL CONTROLS & MENU NAVIGATION
 **
 NUMPAD MODES SYSTEM
 **
-Outside of the Trainer Menu, Numpad 5 is used to cycle through 4 accessibility modes:
-Global Mode -> Horse Mode -> Bodyguard Mode -> Navigation Mode.
+Outside of the Trainer Menu, Numpad 5 is used to cycle through 3 accessibility modes:
+Global Mode -> Horse Mode -> Bodyguard Mode.
 Ensure NumLock is ON.
 
 1. GLOBAL MODE (General status checks)
@@ -48,16 +48,7 @@ Ensure NumLock is ON.
 * Numpad 3: Speak horse stamina bar and health bar.
 * Numpad 4: Speak horse cores (Health and Stamina cores).
 
-3. NAVIGATION & POI BROWSER MODE (Auto-walk & Navigation)
-* Numpad 0: Speak current location with exact coordinates and compass direction.
-* Numpad 1: Toggle auto-walk forward (standard speed, follows roads).
-* Numpad 2: Toggle auto-walk fast (run / gallop).
-* Numpad 7 / 9: Select next / previous Point of Interest (POI) in the sorted list.
-* Numpad 4 / 6: Select previous / next mission or stranger activity.
-* Numpad 8: Toggle auto-navigation to the selected POI or mission. (Arthur/mount will walk automatically along the roads to the destination).
-* Numpad 3: Speak compass direction, degrees, current speed, and distance to target.
-
-4. BODYGUARD / SQUAD MODE (Command bodyguards)
+3. BODYGUARD / SQUAD MODE (Command bodyguards)
 * Numpad 0: Cycle squad formation (Column, Line, Wedge).
 * Numpad 1: Speak squad status (alive count, combat status, and type breakdown: humans, wolves, cougars, etc.).
 * Numpad 2: Regroup (teleport all bodyguards back to you in formation).
@@ -72,14 +63,14 @@ SPECIAL FEATURES (UNDER ACTIVE TESTING)
 **
 
 1. LOOT ANNOUNCER & INVENTORY TRACKER (Automatic)
-* Tracks your inventory in the background and instantly speaks looted items and quantities (e.g. "Looted 3 Yarrow", "Looted 1 Gold Ring").
+* Tracks your inventory in the background and instantly speaks added items and quantities (e.g. "Added 3 Yarrow", "Added 1 Gold Ring").
 * Monitors 100% of satchel items (all 13 fish types, fish meats, plants, exotics, animal parts, feathers, and jewelry).
 * Warning System: Speaks "No items added. Inventory might be full." if a looting, skinning, or picking animation concludes but no items or cash were gained (meaning inventory was already full or target was empty).
 * Numpad Decimal Point Key (.): Diagnostic key. Speaks current position and writes detailed coordinates, nearby interactive objects, and a full inventory count to "nativetrainer.log" in your Documents folder.
 
 2. AUTO-AIM SYSTEM (Combat Aid)
 * Toggle "AUTO AIM" inside the Accessibility sub-menu of the trainer (F4).
-* Hold the aim button (Right-Click on mouse or Left Trigger on controller) to automatically rotate the camera and lock onto the head of the nearest hostile NPC or animal within 150 meters. (Requires clear line of sight).
+* Hold the aim button (Right-Click on mouse or Left Trigger on controller) to automatically rotate the camera and lock onto the chest/torso of the nearest hostile NPC or animal within 150 meters. (Requires clear line of sight).
 
 **
 TROUBLESHOOTING & CONTACT

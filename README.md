@@ -1,10 +1,10 @@
 # Red Dead Redemption 2 - Accessibility Mod (Rdr access)
 **
-           RDR2 Accessibility Mod (v1.9.1 - Beta)
+           RDR2 Accessibility Mod (v1.9.2 - Beta)
 **
 
 IMPORTANT: This is an experimental build currently under active testing and development.
-The entire mod is under testing. All individual features (auto-navigation, teleportation, loot announcements, auto-aim, and bodyguards) are experimental and subject to bugs, stutters, or crashes. Please report issues and back up your save files.
+The entire mod is under testing. All individual features (teleportation, loot announcements, auto-aim, and bodyguards) are experimental and subject to bugs, stutters, or crashes. Please report issues and back up your save files.
 
 **
 [ INSTALLATION ]
@@ -18,7 +18,7 @@ The entire mod is under testing. All individual features (auto-navigation, telep
    Drop them into your RDR2 main game folder (where RDR2.exe is).
 
 3. Now, grab the mod files and paste them into your RDR2 main game folder:
-   - NativeTrainer.asi
+   - RDR access.asi
    - nvdaControllerClient64.dll
    - SAAPI64.dll
    - tolk.dll
@@ -39,7 +39,7 @@ The entire mod is under testing. All individual features (auto-navigation, telep
 **
 [ NUMPAD QUICK MODE SYSTEM ]
 **
-Outside the menu, press [ Numpad 5 ] to cycle through 4 accessibility modes. Each mode configures what the Numpad keys do:
+Outside the menu, press [ Numpad 5 ] to cycle through 3 accessibility modes. Each mode configures what the Numpad keys do:
 
 [ GLOBAL MODE ] (General Player Status)
 - Numpad 0: Current Location and Compass.
@@ -56,15 +56,6 @@ Outside the menu, press [ Numpad 5 ] to cycle through 4 accessibility modes. Eac
 - Numpad 3: Horse Stamina and Health bars.
 - Numpad 4: Horse Health and Stamina Cores.
 
-[ NAVIGATION MODE ] (World Guidance)
-- Numpad 0: Exact Coordinates and Location.
-- Numpad 1: Toggle Auto-Walk (ON/OFF).
-- Numpad 2: Toggle Auto-Run (ON/OFF).
-- Numpad 3: Compass direction, degrees, current speed, and distance to destination.
-- Numpad 4/6: Browse nearby Strangers and Missions.
-- Numpad 7/9: Browse nearby points of interest (POIs).
-- Numpad 8: Toggle Auto-Navigation to selected target (Arthur/mount walks automatically along roads).
-
 [ BODYGUARD MODE ] (Squad Commands)
 - Numpad 0: Cycle squad formation (Column, Line, Wedge).
 - Numpad 1: Check active guard status, combat, and types.
@@ -77,8 +68,8 @@ Outside the menu, press [ Numpad 5 ] to cycle through 4 accessibility modes. Eac
 **
 [ SPECIAL FEATURES (UNDER ACTIVE TESTING) ]
 **
-- **Loot Announcer & Inventory Tracker:** Tracks your inventory in the background and automatically speaks looted items and quantities (e.g. "Looted 3 Yarrow", "Looted 1 Gold Ring"). Monitors 100% of satchel items (all 13 fish, plants, jewelry, animal parts). Speaks "No items added. Inventory might be full" if a loot/skin animation finishes without gaining anything.
-- **Auto-Aim System:** Low-vision combat aid that automatically locks onto the head of the nearest hostile target within 150 meters when holding the aim button.
+- **Loot Announcer & Inventory Tracker:** Tracks your inventory in the background and automatically speaks added items and quantities (e.g. "Added 3 Yarrow", "Added 1 Gold Ring"). Monitors 100% of satchel items (all 13 fish, plants, jewelry, animal parts). Speaks "No items added. Inventory might be full" if a loot/skin animation finishes without gaining anything.
+- **Auto-Aim System:** Low-vision combat aid that automatically locks onto the chest/torso of the nearest hostile target within 150 meters when holding the aim button.
 - **Numpad Decimal Point Key (.):** Diagnostic key. Speaks current position and writes detailed coordinates, nearby interactive objects, and a full inventory count to "nativetrainer.log" in your Documents folder.
 
 **

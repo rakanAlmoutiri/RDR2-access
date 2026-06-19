@@ -46,22 +46,44 @@ static void SpeakWorkerThread() {
     while (g_threadRunning) {
         WaitForSingleObject(g_queueEvent, 100);  // Wait for queue signal or timeout
         
+        std::wstring combinedNonInterruptText;
+        bool hasInterruptText = false;
+        std::wstring interruptText;
+        
         EnterCriticalSection(&g_queueLock);
         while (!g_speakQueue.empty()) {
             auto item = g_speakQueue.front();
             g_speakQueue.pop();
             std::wstring text = item.first;
             BOOL interrupt = item.second;
-            LeaveCriticalSection(&g_queueLock);
             
-            // CRITICAL: NVDA calls happen ONLY in this worker thread, NEVER on main thread
-            if (hTolk && pTolk_Output && g_loadedOK) {
-                call_output(text.c_str(), interrupt);
+            if (interrupt) {
+                // If there's an interrupt request, we must speak it immediately and discard previous non-interrupt text in this batch
+                hasInterruptText = true;
+                interruptText = text;
+                combinedNonInterruptText.clear();
+            } else {
+                if (!combinedNonInterruptText.empty()) {
+                    combinedNonInterruptText += L" ";
+                }
+                combinedNonInterruptText += text;
+                // Add a period at the end of the sentence if it doesn't have punctuation to ensure natural pausing
+                if (!text.empty() && text.back() != L'.' && text.back() != L'!' && text.back() != L'?') {
+                    combinedNonInterruptText += L".";
+                }
             }
-            
-            EnterCriticalSection(&g_queueLock);
         }
         LeaveCriticalSection(&g_queueLock);
+        
+        // CRITICAL: NVDA calls happen ONLY in this worker thread, NEVER on main thread
+        if (hTolk && pTolk_Output && g_loadedOK) {
+            if (!combinedNonInterruptText.empty()) {
+                call_output(combinedNonInterruptText.c_str(), FALSE);
+            }
+            if (hasInterruptText) {
+                call_output(interruptText.c_str(), TRUE);
+            }
+        }
     }
 }
 

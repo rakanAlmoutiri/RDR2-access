@@ -1033,6 +1033,8 @@ public:
 			m_lastShootTime(0) {}
 };
 
+
+
 MenuBase *CreatePlayerTeleportMenu(MenuController *controller)
 {
 	MenuBase *menu = new MenuBase(new MenuItemListTitle("TELEPORT"));
@@ -1072,73 +1074,91 @@ MenuBase *CreatePlayerTeleportMenu(MenuController *controller)
 	// Submenu: Gunsmiths
 	MenuBase *gunsmithsMenu = new MenuBase(new MenuItemListTitle("GUNSMITHS"));
 	controller->RegisterMenu(gunsmithsMenu);
-	gunsmithsMenu->AddItem(new MenuItemPlayerTeleport("VALENTINE GUNSMITH", { -174.0f, 635.0f, 114.0f }, 25.0f, true));
-	gunsmithsMenu->AddItem(new MenuItemPlayerTeleport("RHODES GUNSMITH",    { 1281.0f, -1303.0f, 77.0f }, 90.0f, true));
-	gunsmithsMenu->AddItem(new MenuItemPlayerTeleport("SAINT DENIS GUNSMITH", { 2504.0f, -1306.0f, 46.0f }, 180.0f, true));
-	gunsmithsMenu->AddItem(new MenuItemPlayerTeleport("ANNESBURG GUNSMITH",  { 2929.0f, 1307.0f, 44.0f }, 270.0f, true));
-	gunsmithsMenu->AddItem(new MenuItemPlayerTeleport("BLACKWATER GUNSMITH", { -838.0f, -1302.0f, 43.0f }, 270.0f, true));
-	gunsmithsMenu->AddItem(new MenuItemPlayerTeleport("TUMBLEWEED GUNSMITH", { -5508.0f, -2938.0f, -1.0f }, 0.0f, true));
+	gunsmithsMenu->AddItem(new MenuItemPlayerTeleport("VALENTINE GUNSMITH",   { -281.17f, 778.94f, 119.50f }, 25.0f, true));
+	gunsmithsMenu->AddItem(new MenuItemPlayerTeleport("RHODES GUNSMITH",      { 1322.31f, -1323.02f, 77.89f }, 90.0f, true));
+	gunsmithsMenu->AddItem(new MenuItemPlayerTeleport("SAINT DENIS GUNSMITH", { 2717.14f, -1286.90f, 49.64f }, 180.0f, true));
+	gunsmithsMenu->AddItem(new MenuItemPlayerTeleport("ANNESBURG GUNSMITH",   { 2946.50f, 1319.53f, 44.82f }, 270.0f, true));
+	gunsmithsMenu->AddItem(new MenuItemPlayerTeleport("TUMBLEWEED GUNSMITH",  { -5506.41f, -2963.95f, -0.64f }, 0.0f, true));
 	menu->AddItem(new MenuItemMenu("GUNSMITHS", gunsmithsMenu));
 
 	// Submenu: Stables
 	MenuBase *stablesMenu = new MenuBase(new MenuItemListTitle("STABLES"));
 	controller->RegisterMenu(stablesMenu);
-	stablesMenu->AddItem(new MenuItemPlayerTeleport("VALENTINE STABLE",  { -142.0f, 615.0f, 114.0f }, 0.0f, true));
-	stablesMenu->AddItem(new MenuItemPlayerTeleport("RHODES STABLE",     { 1343.0f, -1326.0f, 73.0f }, 180.0f, true));
-	stablesMenu->AddItem(new MenuItemPlayerTeleport("SAINT DENIS STABLE", { 2475.0f, -1103.0f, 46.0f }, 90.0f, true));
-	stablesMenu->AddItem(new MenuItemPlayerTeleport("BLACKWATER STABLE", { -773.0f, -1256.0f, 43.0f }, 0.0f, true));
+	stablesMenu->AddItem(new MenuItemPlayerTeleport("VALENTINE STABLE",   { -365.20f, 791.94f, 116.18f }, 0.0f));
+	stablesMenu->AddItem(new MenuItemPlayerTeleport("RHODES STABLE",      { 1311.61f, -1339.71f, 77.21f }, 90.0f));
+	stablesMenu->AddItem(new MenuItemPlayerTeleport("SAINT DENIS STABLE", { 2550.67f, -1159.46f, 53.73f }, 90.0f));
+	stablesMenu->AddItem(new MenuItemPlayerTeleport("BLACKWATER STABLE",  { -825.40f, -1323.76f, 47.91f }, 0.0f));
+	stablesMenu->AddItem(new MenuItemPlayerTeleport("TUMBLEWEED STABLE",  { -5517.38f, -2936.82f, -2.22f }, 90.0f));
 	menu->AddItem(new MenuItemMenu("STABLES", stablesMenu));
 
 	// Submenu: Barbers
 	MenuBase *barbersMenu = new MenuBase(new MenuItemListTitle("BARBERS"));
 	controller->RegisterMenu(barbersMenu);
-	barbersMenu->AddItem(new MenuItemPlayerTeleport("VALENTINE BARBER",   { -164.0f, 625.0f, 114.0f }, 25.0f, true));
-	barbersMenu->AddItem(new MenuItemPlayerTeleport("SAINT DENIS BARBER",  { 2663.2f, -1182.4f, 53.2f }, 270.0f, true));
-	barbersMenu->AddItem(new MenuItemPlayerTeleport("BLACKWATER BARBER",   { -814.0f, -1282.0f, 43.0f }, 180.0f, true));
+	barbersMenu->AddItem(new MenuItemPlayerTeleport("VALENTINE BARBER",   { -280.85f, 783.15f, 119.51f }, 25.0f, true));
+	barbersMenu->AddItem(new MenuItemPlayerTeleport("SAINT DENIS BARBER", { 2651.49f, -1211.27f, 53.28f }, 270.0f, true));
+	barbersMenu->AddItem(new MenuItemPlayerTeleport("BLACKWATER BARBER",  { -814.23f, -1365.77f, 43.68f }, 180.0f, true));
 	menu->AddItem(new MenuItemMenu("BARBERS", barbersMenu));
 
-	// Submenu: Saloons & Hotels
-	MenuBase *saloonsMenu = new MenuBase(new MenuItemListTitle("SALOONS & HOTELS"));
+	// Submenu: Saloons
+	MenuBase *saloonsMenu = new MenuBase(new MenuItemListTitle("SALOONS"));
 	controller->RegisterMenu(saloonsMenu);
-	saloonsMenu->AddItem(new MenuItemPlayerTeleport("VALENTINE SALOON", { -164.0f, 625.0f, 114.0f }, 25.0f, true));
-	saloonsMenu->AddItem(new MenuItemPlayerTeleport("VALENTINE HOTEL",  { -218.0f, 659.0f, 114.0f }, 210.0f, true));
-	saloonsMenu->AddItem(new MenuItemPlayerTeleport("RHODES SALOON",     { 1309.0f, -1238.0f, 75.0f }, 90.0f, true));
-	saloonsMenu->AddItem(new MenuItemPlayerTeleport("SAINT DENIS SALOON", { 2454.0f, -1246.0f, 46.0f }, 90.0f, true));
-	saloonsMenu->AddItem(new MenuItemPlayerTeleport("BLACKWATER SALOON", { -793.0f, -1311.0f, 43.0f }, 180.0f, true));
-	saloonsMenu->AddItem(new MenuItemPlayerTeleport("ARMADILLO SALOON",   { -3689.0f, -2648.0f, -14.0f }, 270.0f, true));
-	menu->AddItem(new MenuItemMenu("SALOONS & HOTELS", saloonsMenu));
+	saloonsMenu->AddItem(new MenuItemPlayerTeleport("VALENTINE SALOON",    { -307.96f, 814.16f, 118.99f }, 190.0f, true));
+	saloonsMenu->AddItem(new MenuItemPlayerTeleport("RHODES SALOON",       { 1232.20f, -1251.08f, 73.67f }, 90.0f, true));
+	saloonsMenu->AddItem(new MenuItemPlayerTeleport("SAINT DENIS SALOON",  { 2792.44f, -1176.05f, 47.95f }, 90.0f, true));
+	saloonsMenu->AddItem(new MenuItemPlayerTeleport("VAN HORN SALOON",     { 2983.45f, 430.15f, 51.18f }, 270.0f, true));
+	saloonsMenu->AddItem(new MenuItemPlayerTeleport("STRAWBERRY SALOON",   { -1777.47f, -374.19f, 159.98f }, 270.0f, true));
+	menu->AddItem(new MenuItemMenu("SALOONS", saloonsMenu));
+
+	// Submenu: Hotels
+	MenuBase *hotelsMenu = new MenuBase(new MenuItemListTitle("HOTELS"));
+	controller->RegisterMenu(hotelsMenu);
+	hotelsMenu->AddItem(new MenuItemPlayerTeleport("VALENTINE HOTEL",    { -283.83f, 806.40f, 119.38f }, 321.0f, true));
+	hotelsMenu->AddItem(new MenuItemPlayerTeleport("SAINT DENIS HOTEL",  { 2721.45f, -1446.09f, 46.23f }, 321.0f, true));
+	hotelsMenu->AddItem(new MenuItemPlayerTeleport("BLACKWATER HOTEL",   { -723.95f, -1324.07f, 43.88f }, 188.0f, true));
+	menu->AddItem(new MenuItemMenu("HOTELS", hotelsMenu));
 
 	// Submenu: General Stores
 	MenuBase *storesMenu = new MenuBase(new MenuItemListTitle("GENERAL STORES"));
 	controller->RegisterMenu(storesMenu);
-	storesMenu->AddItem(new MenuItemPlayerTeleport("VALENTINE STORE",   { -192.0f, 651.0f, 114.0f }, 210.0f, true));
-	storesMenu->AddItem(new MenuItemPlayerTeleport("STRAWBERRY STORE",   { -1755.0f, -403.0f, 159.0f }, 270.0f, true));
-	storesMenu->AddItem(new MenuItemPlayerTeleport("RHODES STORE",       { 1321.0f, -1296.0f, 76.0f }, 90.0f, true));
-	storesMenu->AddItem(new MenuItemPlayerTeleport("SAINT DENIS STORE",  { 2558.0f, -1163.0f, 46.0f }, 270.0f, true));
-	storesMenu->AddItem(new MenuItemPlayerTeleport("BLACKWATER STORE",   { -867.0f, -1281.0f, 43.0f }, 90.0f, true));
-	storesMenu->AddItem(new MenuItemPlayerTeleport("ARMADILLO STORE",   { -3658.0f, -2613.0f, -14.0f }, 90.0f, true));
+	storesMenu->AddItem(new MenuItemPlayerTeleport("VALENTINE STORE",   { -324.14f, 803.51f, 117.88f }, 278.0f, true));
+	storesMenu->AddItem(new MenuItemPlayerTeleport("STRAWBERRY STORE",  { -1789.78f, -388.15f, 48.14f }, 270.0f, true));
+	storesMenu->AddItem(new MenuItemPlayerTeleport("RHODES STORE",      { 1328.99f, -1293.28f, 77.02f }, 90.0f, true));
+	storesMenu->AddItem(new MenuItemPlayerTeleport("SAINT DENIS STORE", { 2859.36f, -1202.19f, 49.59f }, 270.0f, true));
+	storesMenu->AddItem(new MenuItemPlayerTeleport("BLACKWATER STORE",  { -784.77f, -1322.15f, 44.02f }, 90.0f, true));
 	menu->AddItem(new MenuItemMenu("GENERAL STORES", storesMenu));
 
 	// Submenu: Doctors
 	MenuBase *doctorsMenu = new MenuBase(new MenuItemListTitle("DOCTORS"));
 	controller->RegisterMenu(doctorsMenu);
-	doctorsMenu->AddItem(new MenuItemPlayerTeleport("VALENTINE DOCTOR",   { -193.0f, 593.0f, 114.0f }, 210.0f, true));
-	doctorsMenu->AddItem(new MenuItemPlayerTeleport("SAINT DENIS DOCTOR",  { 2552.0f, -1285.0f, 46.0f }, 0.0f, true));
+	doctorsMenu->AddItem(new MenuItemPlayerTeleport("VALENTINE DOCTOR",   { -325.29f, 766.24f, 117.48f }, 210.0f, true));
+	doctorsMenu->AddItem(new MenuItemPlayerTeleport("SAINT DENIS DOCTOR", { 2725.05f, -1240.17f, 49.93f }, 0.0f, true));
 	menu->AddItem(new MenuItemMenu("DOCTORS", doctorsMenu));
+
+	// Submenu: Fences
+	MenuBase *fencesMenu = new MenuBase(new MenuItemListTitle("FENCES"));
+	controller->RegisterMenu(fencesMenu);
+	fencesMenu->AddItem(new MenuItemPlayerTeleport("EMERALD RANCH FENCE",  { 1417.82f, 268.03f, 89.62f }, 0.0f, true));
+	fencesMenu->AddItem(new MenuItemPlayerTeleport("SAINT DENIS FENCE",    { 2849.29f, -1203.05f, 47.69f }, 180.0f, true));
+	fencesMenu->AddItem(new MenuItemPlayerTeleport("RHODES FENCE",         { 1232.21f, -1251.09f, 73.68f }, 90.0f, true));
+	fencesMenu->AddItem(new MenuItemPlayerTeleport("VAN HORN FENCE",       { 2983.45f, 430.15f, 51.18f }, 270.0f, true));
+	menu->AddItem(new MenuItemMenu("FENCES", fencesMenu));
 
 	// Submenu: Trappers & Tailors
 	MenuBase *trappersMenu = new MenuBase(new MenuItemListTitle("TRAPPERS & TAILORS"));
 	controller->RegisterMenu(trappersMenu);
-	trappersMenu->AddItem(new MenuItemPlayerTeleport("SAINT DENIS TRAPPER",  { 2644.0f, -1181.0f, 46.0f }, 0.0f, true));
-	trappersMenu->AddItem(new MenuItemPlayerTeleport("RIGGS STATION TRAPPER", { -4612.0f, -2728.0f, -4.0f }, 0.0f, true));
-	trappersMenu->AddItem(new MenuItemPlayerTeleport("SAINT DENIS TAILOR",   { 2567.0f, -1232.0f, 46.0f }, 270.0f, true));
+	trappersMenu->AddItem(new MenuItemPlayerTeleport("SAINT DENIS TRAPPER",     { 2832.54f, -1225.60f, 46.86f }, 0.0f, true));
+	trappersMenu->AddItem(new MenuItemPlayerTeleport("RIGGS STATION TRAPPER",   { -1006.94f, -549.39f, 98.59f }, 0.0f, true));
+	trappersMenu->AddItem(new MenuItemPlayerTeleport("BIG VALLEY TRAPPER",      { -2843.53f, 142.12f, 183.80f }, 0.0f, true));
+	trappersMenu->AddItem(new MenuItemPlayerTeleport("STRAWBERRY TRAPPER",      { -1746.63f, -389.24f, 155.74f }, 0.0f, true));
+	trappersMenu->AddItem(new MenuItemPlayerTeleport("TUMBLEWEED TRAPPER",      { -5512.21f, -2952.12f, -2.59f }, 0.0f, true));
+	trappersMenu->AddItem(new MenuItemPlayerTeleport("SAINT DENIS TAILOR",      { 2567.0f, -1232.0f, 46.0f }, 270.0f, true));
 	menu->AddItem(new MenuItemMenu("TRAPPERS & TAILORS", trappersMenu));
 
 	// Submenu: Post Offices
 	MenuBase *postOfficesMenu = new MenuBase(new MenuItemListTitle("POST OFFICES"));
 	controller->RegisterMenu(postOfficesMenu);
 	postOfficesMenu->AddItem(new MenuItemPlayerTeleport("VALENTINE POST OFFICE",   { -174.0f, 633.0f, 114.0f }, 162.0f, true));
-	postOfficesMenu->AddItem(new MenuItemPlayerTeleport("RHODES POST OFFICE",      { 1232.20f, -1251.08f, 73.67f }, 90.0f, true));
+	postOfficesMenu->AddItem(new MenuItemPlayerTeleport("RHODES POST OFFICE",      { 1230.00f, -1295.00f, 76.90f }, 90.0f, true));
 	postOfficesMenu->AddItem(new MenuItemPlayerTeleport("SAINT DENIS POST OFFICE", { 2747.49f, -1403.77f, 46.19f }, 180.0f, true));
 	postOfficesMenu->AddItem(new MenuItemPlayerTeleport("ANNESBURG POST OFFICE",    { 2904.36f, 1248.80f, 44.87f }, 90.0f, true));
 	postOfficesMenu->AddItem(new MenuItemPlayerTeleport("VAN HORN POST OFFICE",     { 2983.45f, 430.15f, 51.17f }, 270.0f, true));
@@ -1707,155 +1727,9 @@ static Entity g_lastAimedEntity = 0;
 static bool g_wasAiming = false;
 static DWORD g_lastAimCheckMs = 0;
 
-// Navigation mode: activity/POI browser + auto-walk
-static bool g_autoWalkActive = false;
-static bool g_navIgnoreNPCs = false;
-static int g_navHorseSpeedLevel = 2; // 0=walk, 1=trot, 2=canter, 3=gallop
-static const wchar_t* g_navSpeedNames[] = { L"Walk", L"Trot", L"Canter", L"Gallop" };
-static const float g_navSpeedValues[] = { 1.0f, 1.8f, 2.5f, 3.5f };
-static float g_navCurrentSpeed = 1.0f;
-static int g_navOnFootSpeedLevel = 1; // 0=walk, 1=run, 2=sprint
-static const wchar_t* g_navOnFootSpeedNames[] = { L"Walk", L"Run", L"Sprint" };
-static const float g_navOnFootSpeedValues[] = { 1.0f, 2.0f, 3.0f };
-static bool g_navTransitionedToDirect = false;
-static bool g_navToTargetActive = false;
-static float g_navTargetX = 0.0f;
-static float g_navTargetY = 0.0f;
-static float g_navTargetZ = 0.0f;
-static wchar_t g_navTargetName[128] = L"";
-static bool g_navTargetIsIndoor = false;
-static DWORD g_lastStuckCheckMs = 0;
-static Vector3 g_lastStuckPos = { 0.0f, 0.0f, 0.0f };
-static int g_stuckAccumulatorSecs = 0;
-struct NavPOI { float x; float y; float z; const wchar_t* name; const wchar_t* type; };
-static const NavPOI g_navPOIs[] = {
-	// Valentine
-	{ -179.0f, 649.0f, 114.0f, L"Valentine", L"Town" },
-	{ -164.0f, 625.0f, 114.0f, L"Valentine Saloon", L"Saloon" },
-	{ -192.0f, 651.0f, 114.0f, L"Valentine General Store", L"Store" },
-	{ -174.0f, 635.0f, 114.0f, L"Valentine Gunsmith", L"Gunsmith" },
-	{ -193.0f, 593.0f, 114.0f, L"Valentine Doctor", L"Doctor" },
-	{ -142.0f, 615.0f, 114.0f, L"Valentine Stable", L"Stable" },
-	{ -218.0f, 659.0f, 114.0f, L"Valentine Hotel", L"Hotel" },
-	// Blackwater
-	{ -814.0f, -1282.0f, 43.0f, L"Blackwater", L"Town" },
-	{ -793.0f, -1311.0f, 43.0f, L"Blackwater Saloon", L"Saloon" },
-	{ -838.0f, -1302.0f, 43.0f, L"Blackwater Gunsmith", L"Gunsmith" },
-	{ -867.0f, -1281.0f, 43.0f, L"Blackwater General Store", L"Store" },
-	{ -773.0f, -1256.0f, 43.0f, L"Blackwater Stable", L"Stable" },
-	// Saint Denis
-	{ 2432.0f, -1208.0f, 46.0f, L"Saint Denis", L"Town" },
-	{ 2504.0f, -1306.0f, 46.0f, L"Saint Denis Gunsmith", L"Gunsmith" },
-	{ 2558.0f, -1163.0f, 46.0f, L"Saint Denis General Store", L"Store" },
-	{ 2552.0f, -1285.0f, 46.0f, L"Saint Denis Doctor", L"Doctor" },
-	{ 2475.0f, -1103.0f, 46.0f, L"Saint Denis Stable", L"Stable" },
-	{ 2454.0f, -1246.0f, 46.0f, L"Saint Denis Saloon", L"Saloon" },
-	{ 2644.0f, -1181.0f, 46.0f, L"Saint Denis Trapper", L"Trapper" },
-	{ 2567.0f, -1232.0f, 46.0f, L"Saint Denis Tailor", L"Tailor" },
-	// Rhodes
-	{ 1302.0f, -1286.0f, 75.0f, L"Rhodes", L"Town" },
-	{ 1281.0f, -1303.0f, 77.0f, L"Rhodes Gunsmith", L"Gunsmith" },
-	{ 1321.0f, -1296.0f, 76.0f, L"Rhodes General Store", L"Store" },
-	{ 1309.0f, -1238.0f, 75.0f, L"Rhodes Saloon", L"Saloon" },
-	{ 1343.0f, -1326.0f, 73.0f, L"Rhodes Stable", L"Stable" },
-	// Strawberry
-	{ -1791.0f, -384.0f, 160.0f, L"Strawberry", L"Town" },
-	{ -1755.0f, -403.0f, 159.0f, L"Strawberry General Store", L"Store" },
-	{ -1794.0f, -394.0f, 160.0f, L"Strawberry Welcome Center", L"Service" },
-	// Annesburg
-	{ 2929.0f, 1274.0f, 44.0f, L"Annesburg", L"Town" },
-	{ 2929.0f, 1307.0f, 44.0f, L"Annesburg Gunsmith", L"Gunsmith" },
-	// Van Horn
-	{ 2994.0f, 508.0f, 45.0f, L"Van Horn", L"Town" },
-	// Armadillo
-	{ -3659.0f, -2599.0f, -14.0f, L"Armadillo", L"Town" },
-	{ -3658.0f, -2613.0f, -14.0f, L"Armadillo General Store", L"Store" },
-	{ -3689.0f, -2648.0f, -14.0f, L"Armadillo Saloon", L"Saloon" },
-	// Tumbleweed
-	{ -5411.0f, -2930.0f, -1.0f, L"Tumbleweed", L"Town" },
-	{ -5508.0f, -2938.0f, -1.0f, L"Tumbleweed Gunsmith", L"Gunsmith" },
-	// Activities
-	{ -268.0f, 760.0f, 118.0f, L"Flatneck Station Poker", L"Poker" },
-	{ -164.0f, 625.0f, 114.0f, L"Valentine Poker", L"Poker" },
-	{ -793.0f, -1311.0f, 43.0f, L"Blackwater Poker", L"Poker" },
-	{ 2454.0f, -1246.0f, 46.0f, L"Saint Denis Poker", L"Poker" },
-	// Key Locations
-	{ -1612.0f, -1095.0f, 83.0f, L"Beechers Hope", L"Home" },
-	{ 1544.0f, 291.0f, 87.0f, L"Emerald Ranch", L"Ranch" },
-	{ 2162.0f, -648.0f, 42.0f, L"Lagras", L"Settlement" },
-	{ -1350.0f, 530.0f, 96.0f, L"Wallace Station", L"Station" },
-	{ -182.0f, 757.0f, 118.0f, L"Flatneck Station", L"Station" },
-	{ 2464.0f, 1052.0f, 43.0f, L"Butcher Creek", L"Settlement" },
-	{ -268.0f, 782.0f, 118.0f, L"Horseshoe Overlook Camp", L"Camp" },
-	// Trappers
-	{ -4612.0f, -2728.0f, -4.0f, L"Riggs Station Trapper", L"Trapper" },
-	// Post Offices
-	{ -174.0f, 633.0f, 114.0f, L"Valentine Post Office", L"Post Office" },
-	{ 1232.20f, -1251.08f, 73.67f, L"Rhodes Post Office", L"Post Office" },
-	{ 2747.49f, -1403.77f, 46.19f, L"Saint Denis Post Office", L"Post Office" },
-	{ 2904.36f, 1248.80f, 44.87f, L"Annesburg Post Office", L"Post Office" },
-	{ 2983.45f, 430.15f, 51.17f, L"Van Horn Post Office", L"Post Office" },
-	{ 1417.82f, 268.03f, 89.62f, L"Emerald Station Post Office", L"Post Office" },
-	{ -1350.0f, 530.0f, 96.0f, L"Wallace Station Post Office", L"Post Office" },
-	{ -182.0f, 757.0f, 118.0f, L"Flatneck Station Post Office", L"Post Office" },
-	{ -4612.0f, -2728.0f, -4.0f, L"Riggs Station Post Office", L"Post Office" },
-};
-static const int g_numNavPOIs = sizeof(g_navPOIs) / sizeof(g_navPOIs[0]);
-static int g_navCurrentPOI = 0; // current index in POI list
-static int* g_navSortedIndices = nullptr; // sorted by distance
-static int g_navSortedCount = 0;
 
-// Strangers / Activities / Missions database
-struct NavMission { float x; float y; float z; const wchar_t* name; const wchar_t* type; };
-static const NavMission g_navMissions[] = {
-	// Chapter 2 Strangers
-	{ -304.0f, 771.0f, 119.0f, L"Brother Dorkins", L"Stranger" },
-	{ 1585.0f, 303.0f, 88.0f, L"The Veteran", L"Stranger" },
-	{ 2596.0f, -1403.0f, 42.0f, L"Sister Calderon", L"Stranger" },
-	{ -998.0f, -551.0f, 93.0f, L"Albert Mason Photographer", L"Stranger" },
-	{ 1485.0f, 366.0f, 89.0f, L"Hamish Sinclair", L"Stranger" },
-	{ 1287.0f, -1285.0f, 77.0f, L"Alden Train Clerk", L"Stranger" },
-	{ -1794.0f, -392.0f, 159.0f, L"Sheriff Hanley", L"Stranger" },
-	{ 1741.0f, -450.0f, 43.0f, L"Mary Linton", L"Stranger" },
-	{ 2429.0f, -1222.0f, 46.0f, L"Penelope Braithwaite", L"Stranger" },
-	{ -352.0f, 765.0f, 116.0f, L"Deborah MacGuiness", L"Stranger" },
-	{ 2946.0f, 518.0f, 44.0f, L"The Inventor", L"Stranger" },
-	{ 2456.0f, -1073.0f, 46.0f, L"Dorothea Wicklow", L"Stranger" },
-	{ -1192.0f, -566.0f, 100.0f, L"Charles Chatenay", L"Stranger" },
-	{ 2555.0f, -1224.0f, 46.0f, L"Algernon Wasp", L"Stranger" },
-	{ -166.0f, 640.0f, 114.0f, L"Jim Boy Calloway", L"Stranger" },
-	{ 980.0f, -164.0f, 74.0f, L"John Weathers", L"Stranger" },
-	// Activities
-	{ -268.0f, 760.0f, 118.0f, L"Flatneck Poker", L"Activity" },
-	{ -164.0f, 625.0f, 114.0f, L"Valentine Poker", L"Activity" },
-	{ -793.0f, -1311.0f, 43.0f, L"Blackwater Poker", L"Activity" },
-	{ 2454.0f, -1246.0f, 46.0f, L"Saint Denis Poker", L"Activity" },
-	{ 1309.0f, -1238.0f, 75.0f, L"Rhodes Poker", L"Activity" },
-	{ 1287.0f, -1365.0f, 75.0f, L"Rhodes Five Finger Fillet", L"Activity" },
-	{ -164.0f, 606.0f, 114.0f, L"Valentine Five Finger Fillet", L"Activity" },
-	{ 2932.0f, 1316.0f, 44.0f, L"Annesburg Dominoes", L"Activity" },
-	{ -1782.0f, -385.0f, 159.0f, L"Strawberry Dominoes", L"Activity" },
-	{ 2432.0f, -1275.0f, 46.0f, L"Saint Denis Dominoes", L"Activity" },
-	{ -814.0f, -1313.0f, 43.0f, L"Blackwater Dominoes", L"Activity" },
-	// Bounty Boards
-	{ -179.0f, 654.0f, 114.0f, L"Valentine Bounty Board", L"Bounty" },
-	{ 1302.0f, -1300.0f, 77.0f, L"Rhodes Bounty Board", L"Bounty" },
-	{ -1790.0f, -399.0f, 160.0f, L"Strawberry Bounty Board", L"Bounty" },
-	{ 2435.0f, -1242.0f, 46.0f, L"Saint Denis Bounty Board", L"Bounty" },
-	{ 2927.0f, 1303.0f, 44.0f, L"Annesburg Bounty Board", L"Bounty" },
-	// Hunting / Fishing
-	{ -1353.0f, 534.0f, 96.0f, L"Wallace Station Fishing", L"Fishing" },
-	{ -1612.0f, -1060.0f, 83.0f, L"Flat Iron Lake Fishing", L"Fishing" },
-	{ 1571.0f, 340.0f, 87.0f, L"Emerald Ranch Fishing", L"Fishing" },
-	// Robberies / Events
-	{ 1283.0f, -1344.0f, 73.0f, L"Rhodes Stage Coach Robbery", L"Robbery" },
-	{ 579.0f, 466.0f, 108.0f, L"Train Robbery (Bacchus Bridge)", L"Robbery" },
-};
-static const int g_numNavMissions = sizeof(g_navMissions) / sizeof(g_navMissions[0]);
-static int g_navCurrentMission = 0;
-static int* g_missionSortedIndices = nullptr;
-static int g_missionSortedCount = 0;
-static bool g_lastBrowsedMission = false; // true=mission list, false=POI list
+
+
 
 // =======================================
 // WEAPON NAME LOOKUP TABLE
@@ -2087,14 +1961,13 @@ static const wchar_t* GetHorseName(Hash modelHash) {
 // =======================================
 // NUMPAD MODE SWITCHING SYSTEM
 // =======================================
-enum class NumpadMode { Bodyguard = 0, Global = 1, Horse = 2, Navigation = 3 };
+enum class NumpadMode { Bodyguard = 0, Global = 1, Horse = 2 };
 static NumpadMode g_currentNumpadMode = NumpadMode::Bodyguard;
 static const wchar_t* GetModeName(NumpadMode m) {
 	switch (m) {
 		case NumpadMode::Bodyguard:  return L"Bodyguard mode";
 		case NumpadMode::Global:     return L"Global mode";
 		case NumpadMode::Horse:      return L"Horse mode";
-		case NumpadMode::Navigation: return L"Navigation mode";
 		default: return L"Unknown";
 	}
 }
@@ -3696,456 +3569,7 @@ static void HandleHorseHotkeys() {
 	}
 }
 
-// =======================================
-// NAVIGATION MODE HELPERS
-// =======================================
 
-// Calculate relative direction string from player to a target
-static const wchar_t* GetRelativeDirection(float playerHeading, float playerX, float playerY, float targetX, float targetY) {
-	float dx = targetX - playerX;
-	float dy = targetY - playerY;
-	float angleToTarget = atan2f(dx, dy) * (180.0f / 3.14159265f);
-	if (angleToTarget < 0) angleToTarget += 360.0f;
-	float rel = angleToTarget - playerHeading;
-	if (rel < 0) rel += 360.0f;
-	if (rel < 22.5f || rel >= 337.5f) return L"ahead";
-	else if (rel < 67.5f) return L"ahead right";
-	else if (rel < 112.5f) return L"to the right";
-	else if (rel < 157.5f) return L"behind right";
-	else if (rel < 202.5f) return L"behind";
-	else if (rel < 247.5f) return L"behind left";
-	else if (rel < 292.5f) return L"to the left";
-	else return L"ahead left";
-}
-
-// Sort POIs by distance from player (rebuilds sorted index array)
-static void RebuildNavSortedList(float px, float py, float pz) {
-	if (!g_navSortedIndices) {
-		g_navSortedIndices = new int[g_numNavPOIs];
-	}
-	// Fill with all indices
-	for (int i = 0; i < g_numNavPOIs; i++) g_navSortedIndices[i] = i;
-	g_navSortedCount = g_numNavPOIs;
-	// Simple bubble sort by distance
-	for (int i = 0; i < g_navSortedCount - 1; i++) {
-		for (int j = 0; j < g_navSortedCount - 1 - i; j++) {
-			int a = g_navSortedIndices[j], b = g_navSortedIndices[j + 1];
-			float da = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(px, py, pz, g_navPOIs[a].x, g_navPOIs[a].y, g_navPOIs[a].z, TRUE);
-			float db = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(px, py, pz, g_navPOIs[b].x, g_navPOIs[b].y, g_navPOIs[b].z, TRUE);
-			if (da > db) { g_navSortedIndices[j] = b; g_navSortedIndices[j + 1] = a; }
-		}
-	}
-	g_navCurrentPOI = 0;
-}
-
-// Announce current POI
-static void AnnounceCurrentPOI(Ped playerPed) {
-	if (g_navSortedCount == 0) return;
-	int idx = g_navSortedIndices[g_navCurrentPOI];
-	Vector3 pos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
-	float heading = ENTITY::GET_ENTITY_HEADING(playerPed);
-	float dist = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(pos.x, pos.y, pos.z, g_navPOIs[idx].x, g_navPOIs[idx].y, g_navPOIs[idx].z, TRUE);
-	const wchar_t* dir = GetRelativeDirection(heading, pos.x, pos.y, g_navPOIs[idx].x, g_navPOIs[idx].y);
-	wchar_t buf[400];
-	swprintf_s(buf, L"%d of %d. %s (%s). %.0f meters, %s",
-		g_navCurrentPOI + 1, g_navSortedCount, g_navPOIs[idx].name, g_navPOIs[idx].type, dist, dir);
-	A11y::speak(buf, true);
-	g_lastBrowsedMission = false;
-}
-
-// Sort missions by distance
-static void RebuildMissionSortedList(float px, float py, float pz) {
-	if (!g_missionSortedIndices) {
-		g_missionSortedIndices = new int[g_numNavMissions];
-	}
-	for (int i = 0; i < g_numNavMissions; i++) g_missionSortedIndices[i] = i;
-	g_missionSortedCount = g_numNavMissions;
-	for (int i = 0; i < g_missionSortedCount - 1; i++) {
-		for (int j = 0; j < g_missionSortedCount - 1 - i; j++) {
-			int a = g_missionSortedIndices[j], b = g_missionSortedIndices[j + 1];
-			float da = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(px, py, pz, g_navMissions[a].x, g_navMissions[a].y, g_navMissions[a].z, TRUE);
-			float db = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(px, py, pz, g_navMissions[b].x, g_navMissions[b].y, g_navMissions[b].z, TRUE);
-			if (da > db) { g_missionSortedIndices[j] = b; g_missionSortedIndices[j + 1] = a; }
-		}
-	}
-	g_navCurrentMission = 0;
-}
-
-// Announce current mission
-static void AnnounceCurrentMission(Ped playerPed) {
-	if (g_missionSortedCount == 0) return;
-	int idx = g_missionSortedIndices[g_navCurrentMission];
-	Vector3 pos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
-	float heading = ENTITY::GET_ENTITY_HEADING(playerPed);
-	float dist = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(pos.x, pos.y, pos.z, g_navMissions[idx].x, g_navMissions[idx].y, g_navMissions[idx].z, TRUE);
-	const wchar_t* dir = GetRelativeDirection(heading, pos.x, pos.y, g_navMissions[idx].x, g_navMissions[idx].y);
-	wchar_t buf[400];
-	swprintf_s(buf, L"%d of %d. %s (%s). %.0f meters, %s",
-		g_navCurrentMission + 1, g_missionSortedCount, g_navMissions[idx].name, g_navMissions[idx].type, dist, dir);
-	A11y::speak(buf, true);
-	g_lastBrowsedMission = true;
-}
-
-// =======================================
-// NAVIGATION MODE HOTKEYS
-// =======================================
-
-static void HandleNavigationHotkeys() {
-	Ped playerPed = PLAYER::PLAYER_PED_ID();
-	if (!ENTITY::DOES_ENTITY_EXIST(playerPed)) return;
-
-	// Numpad 0: Full location with coordinates
-	if (IsKeyJustUp(VK_NUMPAD0)) {
-		Vector3 pos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
-		float heading = ENTITY::GET_ENTITY_HEADING(playerPed);
-		const wchar_t* location = GetLocationName(pos.x, pos.y, pos.z);
-		const wchar_t* compass = GetCompassDirection(heading);
-		wchar_t buf[400];
-		swprintf_s(buf, L"%s, facing %s. Coordinates %.0f, %.0f", location, compass, pos.x, pos.y);
-		A11y::speak(buf, true);
-	}
-
-	// Numpad 1: Toggle auto-walk/ride forward
-	if (IsKeyJustUp(VK_NUMPAD1)) {
-		if (g_autoWalkActive) {
-			// Stop auto-walk
-			AI::CLEAR_PED_TASKS(playerPed, TRUE, FALSE);
-			AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(playerPed, TRUE);
-			if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(playerPed, FALSE);
-
-			bool mounted = PED::IS_PED_ON_MOUNT(playerPed);
-			if (mounted) {
-				Ped horse = PED::GET_MOUNT(playerPed);
-				if (horse) {
-					AI::CLEAR_PED_TASKS(horse, TRUE, FALSE);
-					AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(horse, TRUE);
-					if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(horse, FALSE);
-				}
-			}
-			g_autoWalkActive = false;
-			g_navToTargetActive = false;
-			A11y::speak(L"Auto walk off", true);
-		} else {
-			Vector3 pos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
-			float heading = ENTITY::GET_ENTITY_HEADING(playerPed);
-			float rad = heading * (3.14159265f / 180.0f);
-			float targetX = pos.x + sinf(rad) * 500.0f;
-			float targetY = pos.y + cosf(rad) * 500.0f;
-			float targetZ = pos.z;
-
-			bool mounted = PED::IS_PED_ON_MOUNT(playerPed);
-			float speed = mounted ? g_navSpeedValues[g_navHorseSpeedLevel] : 1.0f;
-			AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(playerPed, FALSE);
-			AI::SET_PED_PATH_AVOID_FIRE(playerPed, TRUE);
-			if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(playerPed, TRUE);
-
-			if (mounted) {
-				Ped horse = PED::GET_MOUNT(playerPed);
-				if (horse) {
-					AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(horse, FALSE);
-					AI::SET_PED_PATH_AVOID_FIRE(horse, TRUE);
-					if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(horse, TRUE);
-				}
-			}
-			AI::TASK_FOLLOW_NAV_MESH_TO_COORD(playerPed, targetX, targetY, targetZ, speed, -1, 2.0f, TRUE, 0.0f);
-			g_navCurrentSpeed = speed;
-			g_autoWalkActive = true;
-			g_navToTargetActive = false;
-			A11y::speak(L"Auto walk on", true);
-		}
-	}
-
-	// Numpad 2: Auto-walk fast (run/gallop)
-	if (IsKeyJustUp(VK_NUMPAD2)) {
-		if (g_autoWalkActive) {
-			AI::CLEAR_PED_TASKS(playerPed, TRUE, FALSE);
-			AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(playerPed, TRUE);
-			if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(playerPed, FALSE);
-
-			bool mounted = PED::IS_PED_ON_MOUNT(playerPed);
-			if (mounted) {
-				Ped horse = PED::GET_MOUNT(playerPed);
-				if (horse) {
-					AI::CLEAR_PED_TASKS(horse, TRUE, FALSE);
-					AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(horse, TRUE);
-					if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(horse, FALSE);
-				}
-			}
-			g_autoWalkActive = false;
-			g_navToTargetActive = false;
-			A11y::speak(L"Auto run off", true);
-		} else {
-			Vector3 pos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
-			float heading = ENTITY::GET_ENTITY_HEADING(playerPed);
-			float rad = heading * (3.14159265f / 180.0f);
-			float targetX = pos.x + sinf(rad) * 1000.0f;
-			float targetY = pos.y + cosf(rad) * 1000.0f;
-			float targetZ = pos.z;
-
-			bool mounted = PED::IS_PED_ON_MOUNT(playerPed);
-			float speed = mounted ? 3.5f : 3.0f;
-			AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(playerPed, FALSE);
-			AI::SET_PED_PATH_AVOID_FIRE(playerPed, TRUE);
-			if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(playerPed, TRUE);
-
-			if (mounted) {
-				Ped horse = PED::GET_MOUNT(playerPed);
-				if (horse) {
-					AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(horse, FALSE);
-					AI::SET_PED_PATH_AVOID_FIRE(horse, TRUE);
-					if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(horse, TRUE);
-				}
-			}
-			AI::TASK_FOLLOW_NAV_MESH_TO_COORD(playerPed, targetX, targetY, targetZ, speed, -1, 2.0f, TRUE, 0.0f);
-			g_navCurrentSpeed = speed;
-			g_autoWalkActive = true;
-			g_navToTargetActive = false;
-			A11y::speak(L"Auto run on", true);
-		}
-	}
-
-	// Numpad 3: Compass heading + speed
-	if (IsKeyJustUp(VK_NUMPAD3)) {
-		float heading = ENTITY::GET_ENTITY_HEADING(playerPed);
-		float compassDeg = heading;
-		if (compassDeg < 0) compassDeg += 360.0f;
-		const wchar_t* compass = GetCompassDirection(heading);
-		float speed = ENTITY::GET_ENTITY_SPEED(playerPed);
-		float speedKmh = speed * 3.6f;
-		bool mounted = PED::IS_PED_ON_MOUNT(playerPed);
-		const wchar_t* state;
-		if (mounted) {
-			Ped horse = PED::GET_MOUNT(playerPed);
-			if (horse && AI::IS_PED_SPRINTING(horse)) state = L"Galloping";
-			else if (horse && AI::IS_PED_RUNNING(horse)) state = L"Cantering";
-			else if (speed > 0.5f) state = L"Trotting";
-			else state = L"Stopped on horse";
-		} else {
-			if (AI::IS_PED_SPRINTING(playerPed)) state = L"Sprinting";
-			else if (AI::IS_PED_RUNNING(playerPed)) state = L"Running";
-			else if (AI::IS_PED_WALKING(playerPed)) state = L"Walking";
-			else state = L"Standing";
-		}
-		wchar_t buf[600];
-		swprintf_s(buf, L"%s, %.0f degrees. %s, %.0f km per hour", compass, compassDeg, state, speedKmh);
-
-		if (g_navToTargetActive) {
-			Vector3 pos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
-			float dist = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(pos.x, pos.y, pos.z, g_navTargetX, g_navTargetY, g_navTargetZ, TRUE);
-			const wchar_t* dir = GetRelativeDirection(heading, pos.x, pos.y, g_navTargetX, g_navTargetY);
-			wchar_t navBuf[256];
-			swprintf_s(navBuf, L". Target %s is %s, %.0f meters", g_navTargetName, dir, dist);
-			wcscat_s(buf, navBuf);
-		}
-
-		A11y::speak(buf, true);
-	}
-
-	// Numpad 4: Previous mission/stranger/activity
-	if (IsKeyJustUp(VK_NUMPAD4)) {
-		if (g_missionSortedCount == 0) {
-			Vector3 pos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
-			RebuildMissionSortedList(pos.x, pos.y, pos.z);
-		}
-		if (g_missionSortedCount > 0) {
-			g_navCurrentMission = (g_navCurrentMission - 1 + g_missionSortedCount) % g_missionSortedCount;
-			AnnounceCurrentMission(playerPed);
-		}
-	}
-
-	// Numpad 6: Next mission/stranger/activity
-	if (IsKeyJustUp(VK_NUMPAD6)) {
-		if (g_missionSortedCount == 0) {
-			Vector3 pos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
-			RebuildMissionSortedList(pos.x, pos.y, pos.z);
-		}
-		if (g_missionSortedCount > 0) {
-			g_navCurrentMission = (g_navCurrentMission + 1) % g_missionSortedCount;
-			AnnounceCurrentMission(playerPed);
-		}
-	}
-
-	// Numpad 7: Next POI in list
-	if (IsKeyJustUp(VK_NUMPAD7)) {
-		if (g_navSortedCount == 0) {
-			// Auto-build list on first use
-			Vector3 pos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
-			RebuildNavSortedList(pos.x, pos.y, pos.z);
-		}
-		if (g_navSortedCount > 0) {
-			g_navCurrentPOI = (g_navCurrentPOI + 1) % g_navSortedCount;
-			AnnounceCurrentPOI(playerPed);
-		}
-	}
-
-	// Numpad 9: Previous POI in list
-	if (IsKeyJustUp(VK_NUMPAD9)) {
-		if (g_navSortedCount == 0) {
-			Vector3 pos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
-			RebuildNavSortedList(pos.x, pos.y, pos.z);
-		}
-		if (g_navSortedCount > 0) {
-			g_navCurrentPOI = (g_navCurrentPOI - 1 + g_navSortedCount) % g_navSortedCount;
-			AnnounceCurrentPOI(playerPed);
-		}
-	}
-
-	// Numpad 8: Auto-navigate to last browsed item (POI or mission) — toggle on/off
-	if (IsKeyJustUp(VK_NUMPAD8)) {
-		// If currently navigating, stop
-		if (g_autoWalkActive) {
-			AI::CLEAR_PED_TASKS(playerPed, TRUE, FALSE);
-			AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(playerPed, TRUE);
-			if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(playerPed, FALSE);
-
-			bool mounted = PED::IS_PED_ON_MOUNT(playerPed);
-			if (mounted) {
-				Ped horse = PED::GET_MOUNT(playerPed);
-				if (horse) {
-					AI::CLEAR_PED_TASKS(horse, TRUE, FALSE);
-					AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(horse, TRUE);
-					if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(horse, FALSE);
-				}
-			}
-			g_autoWalkActive = false;
-			g_navToTargetActive = false;
-			A11y::speak(L"Navigation stopped", true);
-			DebugLog::log("Navigation stopped manually.");
-			
-			// Clear GPS waypoint (Disabled: may cause crashes depending on build)
-			// invoke<Void>(0x08FDC6F796E350D1); // CLEAR_GPS_PLAYER_WAYPOINT
-			return;
-		}
-
-		float tx, ty, tz;
-		const wchar_t* targetName = nullptr;
-
-		if (g_lastBrowsedMission) {
-			if (g_missionSortedCount == 0) {
-				A11y::speak(L"Press Numpad 6 to browse missions first", true);
-				return;
-			}
-			int idx = g_missionSortedIndices[g_navCurrentMission];
-			tx = g_navMissions[idx].x;
-			ty = g_navMissions[idx].y;
-			tz = g_navMissions[idx].z;
-			targetName = g_navMissions[idx].name;
-		} else {
-			if (g_navSortedCount == 0) {
-				A11y::speak(L"Press Numpad 7 to browse locations first", true);
-				return;
-			}
-			int idx = g_navSortedIndices[g_navCurrentPOI];
-			tx = g_navPOIs[idx].x;
-			ty = g_navPOIs[idx].y;
-			tz = g_navPOIs[idx].z;
-			targetName = g_navPOIs[idx].name;
-		}
-
-		bool isIndoor = false;
-		if (!g_lastBrowsedMission) {
-			int idx = g_navSortedIndices[g_navCurrentPOI];
-			const wchar_t* type = g_navPOIs[idx].type;
-			isIndoor = (wcscmp(type, L"Gunsmith") == 0 ||
-			            wcscmp(type, L"Store") == 0 ||
-			            wcscmp(type, L"Doctor") == 0 ||
-			            wcscmp(type, L"Stable") == 0 ||
-			            wcscmp(type, L"Saloon") == 0 ||
-			            wcscmp(type, L"Hotel") == 0 ||
-			            wcscmp(type, L"Tailor") == 0 ||
-			            wcscmp(type, L"Trapper") == 0 ||
-			            wcscmp(type, L"Post Office") == 0 ||
-			            wcscmp(type, L"Poker") == 0 ||
-			            wcscmp(type, L"Activity") == 0);
-		}
-
-		Vector3 pos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
-		float dist = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(pos.x, pos.y, pos.z, tx, ty, tz, TRUE);
-
-		bool mounted = PED::IS_PED_ON_MOUNT(playerPed);
-		float minArrivalDist = isIndoor ? (mounted ? 8.0f : 1.8f) : 8.0f;
-		if (dist < minArrivalDist) {
-			if (isIndoor && mounted) {
-				A11y::speak(L"Already outside location. Dismount and walk inside.", true);
-			} else {
-				A11y::speak(L"Already at location", true);
-			}
-			return;
-		}
-
-		// Reset stuck detection
-		g_lastStuckCheckMs = GetTickCount();
-		g_lastStuckPos = pos;
-		g_stuckAccumulatorSecs = 0;
-
-		// Navigate using navmesh (follows roads, avoids cliffs)
-		float speed = mounted ? g_navSpeedValues[g_navHorseSpeedLevel] : g_navOnFootSpeedValues[g_navOnFootSpeedLevel];
-		g_navCurrentSpeed = speed;
-		g_navTransitionedToDirect = false;
-		
-		float navX = tx;
-		float navY = ty;
-		float navZ = tz;
-
-		if (isIndoor) {
-			Vector3 safePos = { 0.0f, 0.0f, 0.0f };
-			if (PATHFIND::GET_SAFE_COORD_FOR_PED(tx, ty, tz, TRUE, &safePos, 0)) {
-				navX = safePos.x;
-				navY = safePos.y;
-				navZ = safePos.z;
-				DebugLog::log("POI navigation: resolved safe navmesh coord for indoor target at (%f, %f, %f)", navX, navY, navZ);
-			} else if (PATHFIND::GET_CLOSEST_VEHICLE_NODE(tx, ty, tz, &safePos, 1, 3.0f, 0)) {
-				navX = safePos.x;
-				navY = safePos.y;
-				navZ = safePos.z;
-				DebugLog::log("POI navigation: resolved closest vehicle node for indoor target at (%f, %f, %f)", navX, navY, navZ);
-			}
-		}
-
-		AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(playerPed, FALSE);
-		AI::SET_PED_PATH_AVOID_FIRE(playerPed, TRUE);
-		if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(playerPed, TRUE);
-
-		if (mounted) {
-			Ped horse = PED::GET_MOUNT(playerPed);
-			if (horse) {
-				AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(horse, FALSE);
-				AI::SET_PED_PATH_AVOID_FIRE(horse, TRUE);
-				if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(horse, TRUE);
-			}
-			AI::TASK_FOLLOW_NAV_MESH_TO_COORD(playerPed, navX, navY, navZ, speed, -1, 5.0f, TRUE, 0.0f);
-			DebugLog::log("Started mounted auto-navigation: player on horse=%d to %ls (%f, %f, %f), speed=%.2f", horse, targetName, navX, navY, navZ, speed);
-		} else {
-			if (dist > 10.0f) {
-				AI::TASK_FOLLOW_NAV_MESH_TO_COORD(playerPed, navX, navY, navZ, speed, -1, 2.0f, TRUE, 0.0f);
-				g_navTransitionedToDirect = false;
-				DebugLog::log("Started on-foot navmesh auto-navigation: player to %ls (%f, %f, %f), speed=%.2f", targetName, navX, navY, navZ, speed);
-			} else {
-				if (isIndoor) {
-					AI::TASK_GO_TO_COORD_ANY_MEANS(playerPed, tx, ty, tz, speed, 0, FALSE, 0, 0.0f);
-					g_navTransitionedToDirect = true;
-					DebugLog::log("Started on-foot direct auto-navigation (close): player to %ls (%f, %f, %f), speed=%.2f", targetName, tx, ty, tz, speed);
-				} else {
-					AI::TASK_FOLLOW_NAV_MESH_TO_COORD(playerPed, navX, navY, navZ, speed, -1, 2.0f, TRUE, 0.0f);
-					g_navTransitionedToDirect = false;
-					DebugLog::log("Started on-foot navmesh auto-navigation (close outdoor): player to %ls (%f, %f, %f), speed=%.2f", targetName, navX, navY, navZ, speed);
-				}
-			}
-		}
-
-		g_navTargetX = tx;
-		g_navTargetY = ty;
-		g_navTargetZ = tz;
-		wcsncpy_s(g_navTargetName, targetName, 127);
-		g_navTargetIsIndoor = isIndoor;
-		g_navToTargetActive = true;
-		g_autoWalkActive = true;
-
-		wchar_t buf[400];
-		swprintf_s(buf, L"Navigating to %s. %.0f meters", targetName, dist);
-		A11y::speak(buf, true);
-	}
-}
 
 // =======================================
 // UNIFIED NUMPAD MODE HANDLER
@@ -4155,7 +3579,7 @@ static void HandleNumpadModes() {
 	// Numpad 5: Switch mode
 	if (IsKeyJustUp(VK_NUMPAD5)) {
 		int m = (int)g_currentNumpadMode;
-		m = (m + 1) % 4;
+		m = (m + 1) % 3;
 		g_currentNumpadMode = (NumpadMode)m;
 		A11y::speak(GetModeName(g_currentNumpadMode), true);
 		return; // consume the key
@@ -4171,9 +3595,6 @@ static void HandleNumpadModes() {
 			break;
 		case NumpadMode::Horse:
 			HandleHorseHotkeys();
-			break;
-		case NumpadMode::Navigation:
-			HandleNavigationHotkeys();
 			break;
 	}
 }
@@ -4288,49 +3709,7 @@ public:
 	MenuItemAutoAimToggle(string caption) : MenuItemSwitchable(caption) { SetState(g_autoAimEnabled); }
 };
 
-class MenuItemNavIgnoreNPCsToggle : public MenuItemSwitchable
-{
-	virtual void OnSelect() {
-		g_navIgnoreNPCs = !g_navIgnoreNPCs;
-		SetState(g_navIgnoreNPCs);
-		A11y::speak(g_navIgnoreNPCs ? L"Ignore NPCs on" : L"Ignore NPCs off", true);
-	}
-public:
-	MenuItemNavIgnoreNPCsToggle(string caption) : MenuItemSwitchable(caption) { SetState(g_navIgnoreNPCs); }
-};
 
-class MenuItemNavHorseSpeed : public MenuItemDefault
-{
-	virtual void OnSelect() {
-		g_navHorseSpeedLevel = (g_navHorseSpeedLevel + 1) % 4;
-		wchar_t buf[100];
-		swprintf_s(buf, L"Horse speed: %s", g_navSpeedNames[g_navHorseSpeedLevel]);
-		A11y::speak(buf, true);
-	}
-public:
-	MenuItemNavHorseSpeed(string caption) : MenuItemDefault(caption) {}
-};
-
-class MenuItemNavOnFootSpeed : public MenuItemDefault
-{
-	virtual void OnSelect() {
-		g_navOnFootSpeedLevel = (g_navOnFootSpeedLevel + 1) % 3;
-		wchar_t buf[100];
-		swprintf_s(buf, L"On foot speed: %s", g_navOnFootSpeedNames[g_navOnFootSpeedLevel]);
-		A11y::speak(buf, true);
-	}
-public:
-	MenuItemNavOnFootSpeed(string caption) : MenuItemDefault(caption) {}
-};
-
-MenuBase *CreateNavSettingsMenu(MenuController *controller) {
-	auto menu = new MenuBase(new MenuItemTitle("AUTO NAVIGATION SETTINGS"));
-	controller->RegisterMenu(menu);
-	menu->AddItem(new MenuItemNavIgnoreNPCsToggle("IGNORE NPCS"));
-	menu->AddItem(new MenuItemNavHorseSpeed("HORSE SPEED"));
-	menu->AddItem(new MenuItemNavOnFootSpeed("ON FOOT SPEED"));
-	return menu;
-}
 
 MenuBase *CreateAccessibilityMenu(MenuController *controller) {
 	auto menu = new MenuBase(new MenuItemTitle("ACCESSIBILITY"));
@@ -4344,7 +3723,6 @@ MenuBase *CreateAccessibilityMenu(MenuController *controller) {
 	menu->AddItem(new MenuItemAutoAnimalBehaviorToggle("AUTO ANIMAL BEHAVIOR"));
 	menu->AddItem(new MenuItemAutoHonorToggle("AUTO HONOR ANNOUNCE"));
 	menu->AddItem(new MenuItemAutoLootToggle("AUTO LOOT ANNOUNCE"));
-	menu->AddItem(new MenuItemMenu("AUTO NAVIGATION SETTINGS", CreateNavSettingsMenu(controller)));
 	return menu;
 }
 
@@ -4721,6 +4099,11 @@ static MonitoredItem g_monitoredItems[] = {
 	{ "PROVISION_CANDY", 0, L"Candy" },
 	{ "PROVISION_OATCAKES", 0, L"Oatcakes" },
 	{ "PROVISION_APPLES", 0, L"Apple" },
+	{ "PROVISION_CARROT", 0, L"Carrot" },
+	{ "PROVISION_CELERY", 0, L"Celery" },
+	{ "PROVISION_PEACH", 0, L"Orchard Peach" },
+	{ "PROVISION_CHERRY", 0, L"Orchard Cherry" },
+	{ "PROVISION_PEAR", 0, L"Orchard Pear" },
 
 	// Tonics
 	{ "CONSUMABLE_HEALTH_CURE", 0, L"Health Cure" },
@@ -4850,8 +4233,92 @@ static MonitoredItem g_monitoredItems[] = {
 	{ "KIT_SILVER_EARRING", 0, L"Silver Earring" },
 	{ "KIT_PLATINUM_EARRING", 0, L"Platinum Earring" },
 
+	// Wedding & Band Rings
+	{ "VALUABLE_GOLD_WEDDING_RING", 0x5F119A5D, L"Gold Wedding Ring" },
+	{ "VALUABLE_SILVER_BAND_RING", 0x02080AC3, L"Silver Band Ring" },
+	{ "VALUABLE_PLATINUM_BAND_RING", 0xA9824C22, L"Platinum Band Ring" },
+	{ "VALUABLE_GOLD_RING", 0xC0A6A625, L"Gold Ring" },
+	{ "VALUABLE_SILVER_RING", 0x4017C68E, L"Silver Ring" },
+	{ "VALUABLE_PLATINUM_RING", 0xC90323E9, L"Platinum Ring" },
+
+	// Additional Valuables
+	{ "VALUABLE_GOLD_TOOTH", 0, L"Gold Tooth" },
+	{ "VALUABLE_GOLD_BAR", 0, L"Gold Bar" },
+	{ "VALUABLE_GOLD_NUGGET", 0, L"Gold Nugget" },
+
+	// Legendary Animal Pelts (Set A)
+	{ "PROVISION_PELT_BEAR_LEGENDARY", 0, L"Legendary Bear Pelt" },
+	{ "PROVISION_PELT_BEAVER_LEGENDARY", 0, L"Legendary Beaver Pelt" },
+	{ "PROVISION_PELT_BISON_LEGENDARY", 0, L"Legendary Bison Pelt" },
+	{ "PROVISION_PELT_BOAR_LEGENDARY", 0, L"Legendary Boar Pelt" },
+	{ "PROVISION_PELT_COUGAR_LEGENDARY", 0, L"Legendary Cougar Pelt" },
+	{ "PROVISION_PELT_COYOTE_LEGENDARY", 0, L"Legendary Coyote Pelt" },
+	{ "PROVISION_PELT_DEER_LEGENDARY", 0, L"Legendary Deer Pelt" },
+	{ "PROVISION_PELT_ELK_LEGENDARY", 0, L"Legendary Elk Pelt" },
+	{ "PROVISION_PELT_FOX_LEGENDARY", 0, L"Legendary Fox Pelt" },
+	{ "PROVISION_PELT_MOOSE_LEGENDARY", 0, L"Legendary Moose Pelt" },
+	{ "PROVISION_PELT_PANTHER_LEGENDARY", 0, L"Legendary Panther Pelt" },
+	{ "PROVISION_PELT_RAM_LEGENDARY", 0, L"Legendary Ram Pelt" },
+	{ "PROVISION_PELT_WOLF_LEGENDARY", 0, L"Legendary Wolf Pelt" },
+
+	// Legendary Animal Pelts (Set B)
+	{ "PROVISION_PELT_LEGENDARY_BEAR", 0, L"Legendary Bear Pelt" },
+	{ "PROVISION_PELT_LEGENDARY_BEAVER", 0, L"Legendary Beaver Pelt" },
+	{ "PROVISION_PELT_LEGENDARY_BISON", 0, L"Legendary Bison Pelt" },
+	{ "PROVISION_PELT_LEGENDARY_BOAR", 0, L"Legendary Boar Pelt" },
+	{ "PROVISION_PELT_LEGENDARY_COUGAR", 0, L"Legendary Cougar Pelt" },
+	{ "PROVISION_PELT_LEGENDARY_COYOTE", 0, L"Legendary Coyote Pelt" },
+	{ "PROVISION_PELT_LEGENDARY_DEER", 0, L"Legendary Deer Pelt" },
+	{ "PROVISION_PELT_LEGENDARY_ELK", 0, L"Legendary Elk Pelt" },
+	{ "PROVISION_PELT_LEGENDARY_FOX", 0, L"Legendary Fox Pelt" },
+	{ "PROVISION_PELT_LEGENDARY_MOOSE", 0, L"Legendary Moose Pelt" },
+	{ "PROVISION_PELT_LEGENDARY_PANTHER", 0, L"Legendary Panther Pelt" },
+	{ "PROVISION_PELT_LEGENDARY_RAM", 0, L"Legendary Ram Pelt" },
+	{ "PROVISION_PELT_LEGENDARY_WOLF", 0, L"Legendary Wolf Pelt" },
+
+	// Legendary Animal Parts
+	{ "PROVISION_BEAR_CLAW_LEGENDARY", 0, L"Legendary Bear Claw" },
+	{ "PROVISION_LEGENDARY_BEAR_CLAW", 0, L"Legendary Bear Claw" },
+	{ "PROVISION_COUGAR_FANG_LEGENDARY", 0, L"Legendary Cougar Fang" },
+	{ "PROVISION_LEGENDARY_COUGAR_FANG", 0, L"Legendary Cougar Fang" },
+	{ "PROVISION_BEAVER_TOOTH_LEGENDARY", 0, L"Legendary Beaver Tooth" },
+	{ "PROVISION_LEGENDARY_BEAVER_TOOTH", 0, L"Legendary Beaver Tooth" },
+	{ "PROVISION_BOAR_TUSK_LEGENDARY", 0, L"Legendary Boar Tusk" },
+	{ "PROVISION_LEGENDARY_BOAR_TUSK", 0, L"Legendary Boar Tusk" },
+	{ "PROVISION_ELK_ANTLER_LEGENDARY", 0, L"Legendary Elk Antler" },
+	{ "PROVISION_LEGENDARY_ELK_ANTLER", 0, L"Legendary Elk Antler" },
+	{ "PROVISION_FOX_CLAW_LEGENDARY", 0, L"Legendary Fox Claw" },
+	{ "PROVISION_LEGENDARY_FOX_CLAW", 0, L"Legendary Fox Claw" },
+	{ "PROVISION_WOLF_HEART_LEGENDARY", 0, L"Legendary Wolf Heart" },
+	{ "PROVISION_LEGENDARY_WOLF_HEART", 0, L"Legendary Wolf Heart" },
+	{ "PROVISION_PANTHER_EYE_LEGENDARY", 0, L"Legendary Panther Eye" },
+	{ "PROVISION_LEGENDARY_PANTHER_EYE", 0, L"Legendary Panther Eye" },
+	{ "PROVISION_RAM_HORN_LEGENDARY", 0, L"Legendary Ram Horn" },
+	{ "PROVISION_LEGENDARY_RAM_HORN", 0, L"Legendary Ram Horn" },
+	{ "PROVISION_BISON_HORN_LEGENDARY", 0, L"Legendary Bison Horn" },
+	{ "PROVISION_LEGENDARY_BISON_HORN", 0, L"Legendary Bison Horn" },
+	{ "PROVISION_MOOSE_ANTLER_LEGENDARY", 0, L"Legendary Moose Antler" },
+	{ "PROVISION_LEGENDARY_MOOSE_ANTLER", 0, L"Legendary Moose Antler" },
+	{ "PROVISION_COYOTE_FANG_LEGENDARY", 0, L"Legendary Coyote Fang" },
+	{ "PROVISION_LEGENDARY_COYOTE_FANG", 0, L"Legendary Coyote Fang" },
+	{ "PROVISION_DEER_ANTLER_LEGENDARY", 0, L"Legendary Deer Antler" },
+	{ "PROVISION_LEGENDARY_DEER_ANTLER", 0, L"Legendary Deer Antler" },
+	{ "PROVISION_TATANKA_HORN_LEGENDARY", 0, L"Legendary Tatanka Bison Horn" },
+	{ "PROVISION_LEGENDARY_TATANKA_HORN", 0, L"Legendary Tatanka Bison Horn" },
+	{ "PROVISION_OWL_FEATHER_LEGENDARY", 0, L"Legendary Owl Feather" },
+	{ "PROVISION_LEGENDARY_OWL_FEATHER", 0, L"Legendary Owl Feather" },
+
 	// Lootable watches overrides
 	{ "gold_pocket_watch_val", 0xB04DA3FC, L"Gold Pocket Watch" },
+	{ "silver_pocket_watch_val", 0xB85675E6, L"Silver Pocket Watch" },
+	{ "platinum_pocket_watch_val", 0x69AAC2A8, L"Platinum Pocket Watch" },
+	{ "gold_jointed_bracelet_val", 0x917FE68A, L"Gold Jointed Bracelet" },
+	{ "gold_jointed_bracelet_val2", 0x0F556342, L"Gold Jointed Bracelet" },
+	{ "silver_chain_bracelet_val", 0xC6F19698, L"Silver Chain Bracelet" },
+	{ "platinum_chain_necklace_val", 0x832A78EF, L"Platinum Chain Necklace" },
+	{ "platinum_earrings_val", 0xB436A18B, L"Platinum Earrings" },
+	{ "gold_earrings_val", 0x5F10D268, L"Gold Earrings" },
+	{ "silver_earrings_val", 0x5FC6B384, L"Silver Earrings" },
 
 	// Fish & Fish Meat
 	{ "PROVISION_FISH_BLUEGILL", 0, L"Bluegill" },
@@ -4954,27 +4421,46 @@ static void HandleAutoLootAnnounce() {
 	static Entity s_lastLootTarget = 0;
 	static DWORD s_lootEndTime = 0;
 	static bool s_pendingLootCheck = false;
-	static int s_preLootCounts[250] = { 0 }; // Allocate static size larger than g_monitoredItemsCount
+	static int s_preLootCounts[g_monitoredItemsCount] = { 0 };
 	static int s_preLootMoney = 0;
 
 	Entity currentTarget = invoke<Entity>(0x14169FA823679E41, playerPed); // GET_LOOTING_PICKUP_TARGET_ENTITY
-	if (currentTarget != 0) {
+	bool isLootingScenario = false;
+	if (PED::IS_PED_USING_ANY_SCENARIO(playerPed) || invoke<BOOL>(0x295E3CCEC879CCD7, playerPed)) { // PED_HAS_USE_SCENARIO_TASK
+		Vector3 playerPos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
+		int peds[256];
+		int count = worldGetAllPeds(peds, 256);
+		for (int i = 0; i < count; i++) {
+			Ped ped = peds[i];
+			if (ENTITY::IS_ENTITY_DEAD(ped) && ped != playerPed) {
+				Vector3 pedPos = ENTITY::GET_ENTITY_COORDS(ped, TRUE, FALSE);
+				float dist = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(playerPos.x, playerPos.y, playerPos.z, pedPos.x, pedPos.y, pedPos.z, TRUE);
+				if (dist < 4.0f) {
+					isLootingScenario = true;
+					break;
+				}
+			}
+		}
+	}
+
+	bool isLootingCurrent = (currentTarget != 0) || isLootingScenario;
+	if (isLootingCurrent) {
 		if (!s_isLootingActive) {
 			s_isLootingActive = true;
 			s_lastLootTarget = currentTarget;
 			s_pendingLootCheck = false;
 			s_preLootMoney = invoke<int>(0x0C02DABFA3B98176); // _MONEY_GET_CASH_BALANCE
-			for (int i = 0; i < g_monitoredItemsCount && i < 250; ++i) {
+			for (int i = 0; i < g_monitoredItemsCount; ++i) {
 				s_preLootCounts[i] = invoke<int>(0xE787F05DFC977BDE, invId, g_monitoredItems[i].hash, FALSE);
 			}
-			DebugLog::log("Loot Announcer: Loot/Pick interaction started near entity %d", currentTarget);
+			DebugLog::log("Loot Announcer: Loot/Pick/Skin interaction started. target=%d, scenario=%d", currentTarget, isLootingScenario);
 		}
 	} else {
 		if (s_isLootingActive) {
 			s_isLootingActive = false;
 			s_lootEndTime = GetTickCount();
 			s_pendingLootCheck = true;
-			DebugLog::log("Loot Announcer: Loot/Pick interaction finished near entity %d. Waiting for sync.", s_lastLootTarget);
+			DebugLog::log("Loot Announcer: Loot/Pick/Skin interaction finished. Waiting for sync.");
 		}
 	}
 
@@ -4996,9 +4482,9 @@ static void HandleAutoLootAnnounce() {
 		if (diff > 0) {
 			wchar_t buf[256];
 			if (diff == 1) {
-				swprintf_s(buf, L"Looted %s", g_monitoredItems[i].displayName);
+				swprintf_s(buf, L"Added %s", g_monitoredItems[i].displayName);
 			} else {
-				swprintf_s(buf, L"Looted %d %s", diff, g_monitoredItems[i].displayName);
+				swprintf_s(buf, L"Added %d %s", diff, g_monitoredItems[i].displayName);
 			}
 			A11y::speak(buf, false);
 			DebugLog::log("Inventory change auto-announcement: %s increased by %d (total: %d)", g_monitoredItems[i].codeName, diff, currentCount);
@@ -5014,14 +4500,14 @@ static void HandleAutoLootAnnounce() {
 	}
 
 	// If a loot action just completed, verify if anything was added
-	if (s_pendingLootCheck && (GetTickCount() - s_lootEndTime >= 1200)) {
+	if (s_pendingLootCheck && (GetTickCount() - s_lootEndTime >= 2000)) {
 		s_pendingLootCheck = false;
 		// Check if any items actually increased compared to pre-loot snapshot
 		bool actuallyAdded = false;
 		if (currentMoney > s_preLootMoney) {
 			actuallyAdded = true;
 		}
-		for (int i = 0; i < g_monitoredItemsCount && i < 250; ++i) {
+		for (int i = 0; i < g_monitoredItemsCount; ++i) {
 			int currentCount = invoke<int>(0xE787F05DFC977BDE, invId, g_monitoredItems[i].hash, FALSE);
 			if (currentCount > s_preLootCounts[i]) {
 				actuallyAdded = true;
@@ -5110,7 +4596,7 @@ static void HandleAutoAim() {
 		Vector3 myPos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
 		Vector3 tPos;
 		if (PED::IS_PED_HUMAN(g_autoAimTarget)) {
-			tPos = PED::GET_PED_BONE_COORDS(g_autoAimTarget, 31086, 0.0f, 0.0f, 0.0f); // SKEL_Head
+			tPos = PED::GET_PED_BONE_COORDS(g_autoAimTarget, 0x60F2, 0.0f, 0.0f, 0.0f); // SKEL_Spine3 (chest/torso)
 		} else {
 			tPos = ENTITY::GET_ENTITY_COORDS(g_autoAimTarget, TRUE, FALSE);
 			tPos.z += 0.25f; // offset slightly for animals
@@ -5241,7 +4727,7 @@ static void HandleAimingAnnounce() {
 
 MenuBase *CreateMainMenu(MenuController *controller)
 {
-	auto menu = new MenuBase(new MenuItemTitle("NATIVE  TRAINER  (AB)"));
+	auto menu = new MenuBase(new MenuItemTitle("RDR  ACCESS"));
 	controller->RegisterMenu(menu);
 
 	menu->AddItem(new MenuItemMenu("SQUAD MANAGER", CreateBodyguardMenu(controller)));
@@ -5263,7 +4749,7 @@ void main()
 {
 	// Initialize accessibility layer
 	A11y::init();
-	A11y::speak(L"Native Trainer loaded. Ready.", true);
+	A11y::speak(L"R D R access loaded. Ready.", true);
 	
 	// Initialize controller support
 	XController::Init();
@@ -5283,157 +4769,7 @@ void main()
 
 		// Process asynchronous bodyguard spawns
 		ProcessPendingSpawns();
-		// Every-frame speed enforcement for player on foot
-		if (g_autoWalkActive) {
-			Ped pp = PLAYER::PLAYER_PED_ID();
-			if (ENTITY::DOES_ENTITY_EXIST(pp) && !ENTITY::IS_ENTITY_DEAD(pp)) {
-				bool mounted = PED::IS_PED_ON_MOUNT(pp);
-				if (!mounted) {
-					AI::SET_PED_DESIRED_MOVE_BLEND_RATIO(pp, g_navCurrentSpeed);
-				}
-			}
-		}
 
-		// Monitor auto-navigation target arrival
-		if (g_autoWalkActive && g_navToTargetActive) {
-			Ped pp = PLAYER::PLAYER_PED_ID();
-			if (ENTITY::DOES_ENTITY_EXIST(pp) && !ENTITY::IS_ENTITY_DEAD(pp)) {
-				Vector3 pos = ENTITY::GET_ENTITY_COORDS(pp, TRUE, FALSE);
-				float dist = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(pos.x, pos.y, pos.z, g_navTargetX, g_navTargetY, g_navTargetZ, TRUE);
-				
-				bool mounted = PED::IS_PED_ON_MOUNT(pp);
-				float arrivalThreshold = 8.0f;
-				if (g_navTargetIsIndoor) {
-					arrivalThreshold = mounted ? 8.0f : 1.1f;
-				}
-
-				if (dist < arrivalThreshold) {
-					AI::CLEAR_PED_TASKS(pp, TRUE, FALSE);
-					AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(pp, TRUE);
-					if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(pp, FALSE);
-
-					if (mounted) {
-						Ped horse = PED::GET_MOUNT(pp);
-						if (horse) {
-							AI::CLEAR_PED_TASKS(horse, TRUE, FALSE);
-							AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(horse, TRUE);
-							if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(horse, FALSE);
-						}
-					}
-					g_autoWalkActive = false;
-					g_navToTargetActive = false;
-
-					// Clear GPS waypoint (Disabled: may cause crashes depending on build)
-					// invoke<Void>(0x08FDC6F796E350D1); // CLEAR_GPS_PLAYER_WAYPOINT
-
-					wchar_t buf[256];
-					if (g_navTargetIsIndoor) {
-						if (mounted) {
-							swprintf_s(buf, L"Arrived outside %s. Dismount and navigate on foot.", g_navTargetName);
-						} else {
-							swprintf_s(buf, L"Arrived at %s counter.", g_navTargetName);
-						}
-					} else {
-						swprintf_s(buf, L"Arrived at %s", g_navTargetName);
-					}
-					A11y::speak(buf, true);
-					DebugLog::log("Arrived at target: %ls (indoor=%d, mounted=%d)", g_navTargetName, g_navTargetIsIndoor, mounted);
-				} else {
-					// Check if we need to transition to direct pathing for indoor shop
-					if (!mounted && g_navTargetIsIndoor && !g_navTransitionedToDirect && dist <= 10.0f) {
-						DebugLog::log("Transitioning to direct pathing (indoor target closer than 10m)");
-						A11y::speak(L"Entering building...", false);
-						AI::CLEAR_PED_TASKS(pp, TRUE, FALSE);
-						AI::TASK_GO_TO_COORD_ANY_MEANS(pp, g_navTargetX, g_navTargetY, g_navTargetZ, g_navCurrentSpeed, 0, FALSE, 0, 0.0f);
-						g_navTransitionedToDirect = true;
-					}
-
-					// Stuck detection
-					DWORD now = GetTickCount();
-					if (now - g_lastStuckCheckMs >= 1000) {
-						float distMoved = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(pos.x, pos.y, pos.z, g_lastStuckPos.x, g_lastStuckPos.y, g_lastStuckPos.z, TRUE);
-						if (distMoved < 0.15f) {
-							g_stuckAccumulatorSecs++;
-						} else {
-							g_stuckAccumulatorSecs = 0;
-						}
-						g_lastStuckPos = pos;
-						g_lastStuckCheckMs = now;
-
-						bool mounted = PED::IS_PED_ON_MOUNT(pp);
-						float speed = mounted ? g_navSpeedValues[g_navHorseSpeedLevel] : g_navOnFootSpeedValues[g_navOnFootSpeedLevel];
-
-						if (g_stuckAccumulatorSecs == 3 || g_stuckAccumulatorSecs == 6) {
-							DebugLog::log("Navigation stuck detector: static for %d seconds. Repathing...", g_stuckAccumulatorSecs);
-							A11y::speak(L"Stuck, repathing...", false);
-							
-							float navX = g_navTargetX;
-							float navY = g_navTargetY;
-							float navZ = g_navTargetZ;
-
-							if (g_navTargetIsIndoor) {
-								Vector3 safePos = { 0.0f, 0.0f, 0.0f };
-								if (PATHFIND::GET_SAFE_COORD_FOR_PED(g_navTargetX, g_navTargetY, g_navTargetZ, TRUE, &safePos, 0)) {
-									navX = safePos.x;
-									navY = safePos.y;
-									navZ = safePos.z;
-								} else if (PATHFIND::GET_CLOSEST_VEHICLE_NODE(g_navTargetX, g_navTargetY, g_navTargetZ, &safePos, 1, 3.0f, 0)) {
-									navX = safePos.x;
-									navY = safePos.y;
-									navZ = safePos.z;
-								}
-							}
-
-							AI::CLEAR_PED_TASKS_IMMEDIATELY(pp, TRUE, TRUE);
-							if (mounted) {
-								Ped horse = PED::GET_MOUNT(pp);
-								if (horse) {
-									AI::CLEAR_PED_TASKS_IMMEDIATELY(horse, TRUE, TRUE);
-									AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(horse, FALSE);
-									AI::SET_PED_PATH_AVOID_FIRE(horse, TRUE);
-									if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(horse, TRUE);
-									// Apply the task to the player ped pp instead of horse to avoid engine crashes and freezes
-									AI::TASK_FOLLOW_NAV_MESH_TO_COORD(pp, navX, navY, navZ, speed, -1, 5.0f, TRUE, 0.0f);
-								}
-							} else {
-								AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(pp, FALSE);
-								AI::SET_PED_PATH_AVOID_FIRE(pp, TRUE);
-								if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(pp, TRUE);
-								if (g_navTargetIsIndoor && dist <= 10.0f) {
-									AI::TASK_GO_TO_COORD_ANY_MEANS(pp, g_navTargetX, g_navTargetY, g_navTargetZ, speed, 0, FALSE, 0, 0.0f);
-									g_navTransitionedToDirect = true;
-								} else {
-									AI::TASK_FOLLOW_NAV_MESH_TO_COORD(pp, navX, navY, navZ, speed, -1, 2.0f, TRUE, 0.0f);
-									g_navTransitionedToDirect = false;
-								}
-							}
-						} else if (g_stuckAccumulatorSecs >= 9) {
-							DebugLog::log("Navigation stuck detector: static for 9 seconds. Stopping navigation.");
-							A11y::speak(L"Navigation stuck, stopping", true);
-							
-							AI::CLEAR_PED_TASKS(pp, TRUE, FALSE);
-							AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(pp, TRUE);
-							if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(pp, FALSE);
-							
-							if (mounted) {
-								Ped horse = PED::GET_MOUNT(pp);
-								if (horse) {
-									AI::CLEAR_PED_TASKS(horse, TRUE, FALSE);
-									AI::SET_PED_PATH_CAN_DROP_FROM_HEIGHT(horse, TRUE);
-									if (g_navIgnoreNPCs) PED::SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(horse, FALSE);
-								}
-							}
-							g_autoWalkActive = false;
-							g_navToTargetActive = false;
-							g_stuckAccumulatorSecs = 0;
-							
-							// Clear GPS waypoint (Disabled: may cause crashes depending on build)
-							// invoke<Void>(0x08FDC6F796E350D1); // CLEAR_GPS_PLAYER_WAYPOINT
-						}
-					}
-				}
-			}
-		}
 
 		if (!menuController->HasActiveMenu()) {
 			// Keyboard input

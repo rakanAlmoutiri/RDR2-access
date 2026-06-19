@@ -117,7 +117,8 @@ if not exist "%PACK_DIR%" (
   if errorlevel 1 goto :err
 )
 
-copy /Y "%NT_OUT%" "%PACK_DIR%\NativeTrainer.asi" >nul
+if exist "%PACK_DIR%\NativeTrainer.asi" del /Q "%PACK_DIR%\NativeTrainer.asi"
+copy /Y "%NT_OUT%" "%PACK_DIR%\RDR access.asi" >nul
 if errorlevel 1 goto :err
 if defined TOLK_OUT goto :copy_tolk_to_pkg
 echo WARNING: tolk.dll not included in package.
@@ -135,7 +136,7 @@ if exist "%~dp0README_package.txt" (
   if not exist "%PACK_DIR%\README.txt" (
     echo Creating minimal README stub in package ^(template not found^)
     echo Copy both files to your Red Dead Redemption 2 game directory ^(where RDR2.exe is^):>"%PACK_DIR%\README.txt"
-    echo - NativeTrainer.asi>>"%PACK_DIR%\README.txt"
+    echo - RDR access.asi>>"%PACK_DIR%\README.txt"
     echo - tolk.dll ^(optional, needed for NVDA/JAWS speech via Tolk^)>>"%PACK_DIR%\README.txt"
     echo Ensure ScriptHookRDR2 is installed. NVDA should be running for speech.>>"%PACK_DIR%\README.txt"
   ) else (
@@ -147,7 +148,7 @@ if exist "%~dp0README_package.txt" (
 echo SUCCESS. Output:
 echo   %NT_OUT%
 if defined TOLK_OUT echo   %~dp0samples\NativeTrainer\bin\Release\tolk.dll
-echo   %PACK_DIR%\NativeTrainer.asi
+echo   %PACK_DIR%\RDR access.asi
 if defined TOLK_OUT echo   %PACK_DIR%\tolk.dll
 echo   %PACK_DIR%\README.txt
 exit /b 0
