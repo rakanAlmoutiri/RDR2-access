@@ -3372,13 +3372,28 @@ static void HandleGlobalHotkeys() {
 		                        (hours >= 12 && hours < 18) ? L"Afternoon" :
 		                        (hours >= 18 && hours < 21) ? L"Evening" : L"Night";
 
+		Hash wHash = invoke<Hash>(0x4BEB42AEBCA732E9); // _GET_PREV_WEATHER_TYPE_HASH_NAME
+		const wchar_t* weather = L"Unknown weather";
+		switch(wHash) {
+			case 0x060a3b31: weather = L"Sunny"; break;
+			case 0xc51d9240: weather = L"Rainy"; break;
+			case 0x6eaf37f6: weather = L"Snowing"; break;
+			case 0x252b5e01: weather = L"Foggy"; break;
+			case 0x710ce29d: weather = L"Cloudy"; break;
+			case 0x87b83ee1: weather = L"Overcast"; break;
+			case 0xc819fc6e: weather = L"Thunderstorm"; break;
+			case 0x4ae43128: weather = L"Drizzling"; break;
+			case 0x5248b05b: weather = L"Blizzard"; break;
+			case 0x1929f317: weather = L"Hurricane"; break;
+			case 0x000f1668: weather = L"Hail"; break;
+			case 0xe619af8c: weather = L"Light Snow"; break;
+			case 0xdb2be23e: weather = L"Clear Snow"; break;
+			case 0x93fd33ac: weather = L"Misty"; break;
+			case 0x0a19ffeb: weather = L"Sandstorm"; break;
+		}
+
 		wchar_t buf[300];
-		if (bounty > 0)
-			swprintf_s(buf, L"%s, %d:%02d. Stamina bar %d%%. Deadeye bar %d%%. Bounty %d dollars",
-				period, hours, minutes, stamPct, dePct, bounty);
-		else
-			swprintf_s(buf, L"%s, %d:%02d. Stamina bar %d%%. Deadeye bar %d%%. No bounty",
-				period, hours, minutes, stamPct, dePct);
+		swprintf_s(buf, L"%s, %d:%02d, %s", period, hours, minutes, weather);
 		A11y::speak(buf, true);
 	}
 
@@ -5621,25 +5636,25 @@ static void HandleAutoAim() {
 	}
 
 	// Only activate when player is aiming (holding aim button)
-	bool isAiming = PLAYER::IS_PLAYER_FREE_AIMING(player) ? true : false;
+	// Check raw input to avoid flickering when tasks are assigned
+	bool isAiming = (XController::GetLeftTrigger(0) > 0.5f) || ((GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0);
 	if (!isAiming) {
 		g_autoAimTarget = 0;
 		return;
 	}
 
 	DWORD now = GetTickCount();
-	// Scan for target every 100ms (or if we don't have a valid target)
+	// Scan for target every 100ms
 	if (g_autoAimTarget == 0 || !ENTITY::DOES_ENTITY_EXIST(g_autoAimTarget) || ENTITY::IS_ENTITY_DEAD(g_autoAimTarget) || (now - g_lastAutoAimMs) >= 100) {
 		g_lastAutoAimMs = now;
 		
 		Vector3 myPos = ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE);
 
-		// Scan nearby peds for hostile targets using worldGetAllPeds
 		int peds[1024];
 		int count = worldGetAllPeds(peds, 1024);
 
 		Ped bestTarget = 0;
-		float bestDist = 150.0f; // max auto-aim range
+		float bestScore = 999999.0f; // lower is better
 
 		for (int i = 0; i < count; ++i) {
 			Ped p = (Ped)peds[i];
@@ -5647,25 +5662,37 @@ static void HandleAutoAim() {
 			if (!ENTITY::DOES_ENTITY_EXIST(p) || ENTITY::IS_ENTITY_DEAD(p)) continue;
 			if (IsOurGuard(p)) continue;
 
-			// Only target hostiles (relationship >= 4 = dislike/hate, or in combat with player/squad)
-			int rel = PED::GET_RELATIONSHIP_BETWEEN_PEDS(p, playerPed);
-			bool isHostile = (rel >= 4) || PED::IS_PED_IN_COMBAT(p, playerPed);
-			if (!isHostile) continue;
-
-			// Check line of sight
+			// Must have line of sight
 			if (!ENTITY::HAS_ENTITY_CLEAR_LOS_TO_ENTITY(playerPed, p, 17)) continue;
 
 			Vector3 tPos = ENTITY::GET_ENTITY_COORDS(p, TRUE, FALSE);
 			float d = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(myPos.x, myPos.y, myPos.z, tPos.x, tPos.y, tPos.z, TRUE);
-			if (d < bestDist) {
-				bestDist = d;
+			
+			if (d > 150.0f) continue; // max range
+
+			// Calculate a "score" for the target. Distance is the base.
+			float score = d;
+
+			// Priority 1: Hostile Enemies (reduce score massively to prioritize)
+			int rel = PED::GET_RELATIONSHIP_BETWEEN_PEDS(p, playerPed);
+			bool isHostile = (rel >= 4) || PED::IS_PED_IN_COMBAT(p, playerPed);
+			if (isHostile) {
+				score -= 1000.0f; 
+			} 
+			// Priority 2: Animals (Hunting)
+			else if (!PED::IS_PED_HUMAN(p)) {
+				score -= 500.0f;
+			}
+			// Civilians remain at base distance score, only targeted if nothing else is near.
+
+			if (score < bestScore) {
+				bestScore = score;
 				bestTarget = p;
 			}
 		}
 
 		if (bestTarget && ENTITY::DOES_ENTITY_EXIST(bestTarget)) {
 			if (bestTarget != g_autoAimTarget) {
-				DebugLog::log("Auto-aim locked onto ped: %d. Distance: %.2f", bestTarget, bestDist);
 				g_autoAimTarget = bestTarget;
 			}
 		} else {
@@ -5690,20 +5717,17 @@ static void HandleAutoAim() {
 
 		float groundDist = sqrtf(dx * dx + dy * dy);
 
-		// Calculate heading and pitch angles
 		float targetHeading = atan2f(-dx, dy) * (180.0f / 3.14159265f);
 		if (targetHeading < 0.0f) targetHeading += 360.0f;
 
 		float targetPitch = atan2f(dz, groundDist) * (180.0f / 3.14159265f);
 
-		// Face target
+		// Face target and snap camera
 		ENTITY::SET_ENTITY_HEADING(playerPed, targetHeading);
-
-		// Snap gameplay camera relative to player facing direction
 		CAM::SET_GAMEPLAY_CAM_RELATIVE_HEADING(0.0f, 1.0f);
 		CAM::SET_GAMEPLAY_CAM_RELATIVE_PITCH(targetPitch, 1.0f);
 
-		// Task aim gun at target
+		// Force ped to aim
 		AI::TASK_AIM_GUN_AT_ENTITY(playerPed, g_autoAimTarget, -1, FALSE, 0);
 	}
 }
@@ -5727,83 +5751,72 @@ static const wchar_t* GetPedAnimalName(Ped ped) {
 
 static void HandleAimingAnnounce() {
 	DWORD now = GetTickCount();
-	if ((now - g_lastAimCheckMs) < 200) return;
-	g_lastAimCheckMs = now;
+	if ((now - g_lastAimCheckMs) < 250) return; // Beep every 250ms
 
 	Player player = PLAYER::PLAYER_ID();
 	Ped playerPed = PLAYER::PLAYER_PED_ID();
 	if (!ENTITY::DOES_ENTITY_EXIST(playerPed)) return;
 
-	bool isAiming = PLAYER::IS_PLAYER_FREE_AIMING(player) ? true : false;
+	// Check raw input to avoid flickering when tasks are assigned
+	bool isAiming = (XController::GetLeftTrigger(0) > 0.5f) || ((GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0);
 
 	if (!isAiming) {
-		if (g_wasAiming) {
-			g_wasAiming = false;
-			g_lastAimedEntity = 0;
-		}
+		g_wasAiming = false;
+		g_lastAimedEntity = 0;
 		return;
 	}
 
 	Entity aimedEntity = 0;
-	bool gotEntity = PLAYER::GET_ENTITY_PLAYER_IS_FREE_AIMING_AT(player, &aimedEntity) ? true : false;
-
-	if (!gotEntity || !aimedEntity || !ENTITY::DOES_ENTITY_EXIST(aimedEntity)) {
-		// Aiming at nothing (wall, ground, sky)
-		if (!g_wasAiming || g_lastAimedEntity != 0) {
-			A11y::speak(L"Aiming at nothing", false);
-			g_lastAimedEntity = 0;
-			g_wasAiming = true;
+	if (g_autoAimEnabled && g_autoAimTarget && ENTITY::DOES_ENTITY_EXIST(g_autoAimTarget) && !ENTITY::IS_ENTITY_DEAD(g_autoAimTarget)) {
+		aimedEntity = g_autoAimTarget;
+	} else {
+		if (!PLAYER::GET_ENTITY_PLAYER_IS_FREE_AIMING_AT(player, &aimedEntity)) {
+			PLAYER::GET_PLAYER_TARGET_ENTITY(player, &aimedEntity);
 		}
+	}
+
+	if (!aimedEntity || !ENTITY::DOES_ENTITY_EXIST(aimedEntity) || ENTITY::IS_ENTITY_DEAD(aimedEntity)) {
+		g_wasAiming = false;
+		g_lastAimedEntity = 0;
 		return;
 	}
 
-	// Only announce when target changes
-	if (g_wasAiming && aimedEntity == g_lastAimedEntity) return;
-
 	g_wasAiming = true;
 	g_lastAimedEntity = aimedEntity;
+	g_lastAimCheckMs = now; // Update timer because we are about to play a sound
 
 	if (ENTITY::IS_ENTITY_A_PED(aimedEntity)) {
 		Ped targetPed = (Ped)aimedEntity;
-		if (ENTITY::IS_ENTITY_DEAD(targetPed)) {
-			A11y::speak(L"Aiming at dead body", false);
-			return;
-		}
 		if (PED::IS_PED_HUMAN(targetPed)) {
-			// Check relationship: 5 = HATE, 4 = DISLIKE, hostile means enemy
-			int rel = PED::GET_RELATIONSHIP_BETWEEN_PEDS(targetPed, playerPed);
-			bool isInCombat = PED::IS_PED_IN_COMBAT(targetPed, playerPed) ? true : false;
-			if (rel >= 4 || isInCombat) {
-				float dist = GAMEPLAY::GET_DISTANCE_BETWEEN_COORDS(
-					ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE).x,
-					ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE).y,
-					ENTITY::GET_ENTITY_COORDS(playerPed, TRUE, FALSE).z,
-					ENTITY::GET_ENTITY_COORDS(targetPed, TRUE, FALSE).x,
-					ENTITY::GET_ENTITY_COORDS(targetPed, TRUE, FALSE).y,
-					ENTITY::GET_ENTITY_COORDS(targetPed, TRUE, FALSE).z, TRUE);
-				wchar_t buf[200];
-				swprintf_s(buf, L"Aiming at enemy, %.0f meters", dist);
-				A11y::speak(buf, true);
+			// Get head coordinates
+			Vector3 headCoords = PED::GET_PED_BONE_COORDS(targetPed, 0x796E, 0, 0, 0); // SKEL_Head
+			float screenX = 0, screenY = 0;
+			bool onScreen = GRAPHICS::GET_SCREEN_COORD_FROM_WORLD_COORD(headCoords.x, headCoords.y, headCoords.z, &screenX, &screenY) ? true : false;
+			
+			// Screen center is 0.5, 0.5. Check if distance to center is very small (e.g. < 0.05 which is 5% of screen size)
+			bool isHeadshot = false;
+			if (onScreen) {
+				float dx = screenX - 0.5f;
+				float dy = screenY - 0.5f;
+				float dist = sqrtf(dx * dx + dy * dy);
+				if (dist < 0.08f) { // slightly generous hitbox for head audio
+					isHeadshot = true;
+				}
+			}
+
+			if (isHeadshot) {
+				A11y::playCustomSound(L"head.wav");
 			} else {
-				A11y::speak(L"Aiming at civilian", false);
+				A11y::playCustomSound(L"enemy.wav");
 			}
 		} else {
 			// Animal
-			const wchar_t* animalName = GetPedAnimalName(targetPed);
-			if (animalName) {
-				wchar_t buf[200];
-				swprintf_s(buf, L"Aiming at %s", animalName);
-				A11y::speak(buf, false);
-			} else {
-				A11y::speak(L"Aiming at animal", false);
-			}
+			A11y::playCustomSound(L"enemy.wav");
 		}
 	} else if (ENTITY::IS_ENTITY_A_VEHICLE(aimedEntity)) {
-		A11y::speak(L"Aiming at vehicle", false);
+		A11y::playCustomSound(L"vehicle.wav");
 	} else if (ENTITY::IS_ENTITY_AN_OBJECT(aimedEntity)) {
-		A11y::speak(L"Aiming at object", false);
-	} else {
-		A11y::speak(L"Aiming at something", false);
+		A11y::playCustomSound(L"object.wav");
 	}
 }
 

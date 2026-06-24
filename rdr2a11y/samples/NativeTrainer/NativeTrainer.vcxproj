@@ -70,6 +70,7 @@
       <GenerateDebugInformation>false</GenerateDebugInformation>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
+      <AdditionalDependencies>winmm.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalOptions>..\..\lib\ScriptHookRDR2.lib %(AdditionalOptions)</AdditionalOptions>
     </Link>
     <!-- PostBuild packaging is handled by build_all.cmd; leave empty to avoid MSBuild cmd parsing issues. -->

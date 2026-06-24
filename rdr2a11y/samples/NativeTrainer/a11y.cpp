@@ -1,5 +1,6 @@
 #include "a11y.h"
 #include <windows.h>
+#include <mmsystem.h>
 #include <queue>
 #include <thread>
 
@@ -180,6 +181,11 @@ void speak(const std::wstring &text, bool interrupt) {
     if (g_queueEvent) {
         SetEvent(g_queueEvent);
     }
+}
+
+void playCustomSound(const wchar_t* filename) {
+    // Play the wav file asynchronously. If a sound is already playing, this will stop it and play the new one.
+    PlaySoundW(filename, NULL, SND_FILENAME | SND_ASYNC | SND_NODEFAULT);
 }
 
 } // namespace A11y

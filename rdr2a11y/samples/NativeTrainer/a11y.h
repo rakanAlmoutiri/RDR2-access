@@ -36,5 +36,6 @@ inline bool isReady() {
     void init();
     void shutdown();
     void speak(const std::wstring &text, bool interrupt = true);
+    void playCustomSound(const wchar_t* filename);
 
 } // namespace A11y
