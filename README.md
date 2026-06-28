@@ -6,7 +6,7 @@
 طريقة التركيب
 1. حمل ملفات Script Hook RDR2 من موقعهم الرسمي وخذ منها ملفين بس (ScriptHookRDR2.dll و dinput8.dll) وحطها في مجلد اللعبة الرئيسي.
 2. حمل ملفات المود حقتنا والصقها في مجلد اللعبة الرئيسي وهي:
-* RDR access.asi
+* RdrAccess.asi
 * nvdaControllerClient64.dll
 * SAAPI64.dll
 * tolk.dll
